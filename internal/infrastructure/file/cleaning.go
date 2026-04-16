@@ -46,12 +46,11 @@ func (TextCleaner) Clean(text string) string {
 
 func (c TextCleaner) CleanWithLimit(text string, limit int) string {
 	cleaned := c.Clean(text)
-	if limit <= 0 || utf8.RuneCountInString(cleaned) <= limit {
+	if limit <= 0 || len(cleaned) <= limit {
 		return cleaned
 	}
 
-	runes := []rune(cleaned)
-	return strings.TrimSpace(string(runes[:limit]))
+	return strings.TrimSpace(truncateUTF8Bytes(cleaned, limit))
 }
 
 func (c TextCleaner) CleanToSingleLine(text string) string {
@@ -82,4 +81,16 @@ func shouldDropLine(line string) bool {
 		imageURLLine.MatchString(line) ||
 		fileURLLine.MatchString(line) ||
 		separatorLine.MatchString(line)
+}
+
+func truncateUTF8Bytes(text string, limit int) string {
+	if limit <= 0 || len(text) <= limit {
+		return text
+	}
+
+	end := limit
+	for end > 0 && !utf8.ValidString(text[:end]) {
+		end--
+	}
+	return text[:end]
 }

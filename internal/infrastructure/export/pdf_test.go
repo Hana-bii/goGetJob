@@ -26,6 +26,21 @@ func TestPDFExporterEmitsPDFBytesForSimpleReport(t *testing.T) {
 	require.Equal(t, "%PDF", string(got[:4]))
 }
 
+func TestPDFExporterDefaultSimpleReportRejectsNonASCIIContent(t *testing.T) {
+	exporter := export.NewPDFExporter(export.PDFOptions{})
+	report := export.Report{
+		Title: "中文报告",
+		Sections: []export.ReportSection{
+			{Heading: "Summary", Body: "Candidate is ready."},
+		},
+	}
+
+	_, err := exporter.ExportReport(context.Background(), report)
+
+	require.ErrorContains(t, err, "ASCII")
+	require.ErrorContains(t, err, "FontPath")
+}
+
 func TestPDFExporterAcceptsFontPathOptionForUTF8Reports(t *testing.T) {
 	exporter := export.NewPDFExporter(export.PDFOptions{FontPath: "missing-font.ttf"})
 	report := export.Report{

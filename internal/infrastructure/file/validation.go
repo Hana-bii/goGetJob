@@ -61,6 +61,13 @@ func (v *Validator) Validate(name string, data []byte) error {
 	return v.ValidateType(name, data)
 }
 
+func (v *Validator) MaxSizeBytes() int64 {
+	if v == nil {
+		return DefaultMaxFileSizeBytes
+	}
+	return v.maxSizeBytes
+}
+
 func (v *Validator) ValidateSize(size int64) error {
 	if size <= 0 {
 		return fmt.Errorf("file is empty")

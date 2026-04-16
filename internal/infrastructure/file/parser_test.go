@@ -4,10 +4,13 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 
@@ -60,6 +63,21 @@ func TestParserExtractsAndCleansTXTAndMarkdown(t *testing.T) {
 	require.Equal(t, "plain text", got)
 }
 
+func TestParserParseReaderRejectsOversizedStreamsWithoutReadingPastLimit(t *testing.T) {
+	parser := docfile.NewParser(docfile.ParserOptions{
+		Validation: docfile.ValidationOptions{MaxSizeBytes: 4},
+	})
+	reader := &boundedReadRecorder{
+		data:         []byte("123456789"),
+		maxBytesRead: 5,
+	}
+
+	_, err := parser.ParseReader(context.Background(), "notes.txt", reader)
+
+	require.ErrorContains(t, err, "exceeds")
+	require.LessOrEqual(t, reader.bytesRead, 5)
+}
+
 func TestParserExtractsDOCXText(t *testing.T) {
 	parser := docfile.NewParser(docfile.ParserOptions{})
 	data := buildDOCX(t, []string{"第一段 resume", "second paragraph"})
@@ -71,6 +89,18 @@ func TestParserExtractsDOCXText(t *testing.T) {
 	require.Contains(t, got, "second paragraph")
 }
 
+func TestParserCapsDOCXExtractionByUTF8Bytes(t *testing.T) {
+	parser := docfile.NewParser(docfile.ParserOptions{MaxTextBytes: 5})
+	data := buildDOCX(t, []string{strings.Repeat("界", 128)})
+
+	got, err := parser.ParseBytes(context.Background(), "resume.docx", data)
+
+	require.NoError(t, err)
+	require.True(t, utf8.ValidString(got))
+	require.LessOrEqual(t, len(got), 5)
+	require.Equal(t, "界", got)
+}
+
 func TestParserExtractsPDFText(t *testing.T) {
 	parser := docfile.NewParser(docfile.ParserOptions{})
 
@@ -78,6 +108,35 @@ func TestParserExtractsPDFText(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Contains(t, got, "PDF resume text")
+}
+
+func TestParserCapsPDFLiteralExtractionByUTF8Bytes(t *testing.T) {
+	parser := docfile.NewParser(docfile.ParserOptions{MaxTextBytes: 5})
+
+	got, err := parser.ParseBytes(context.Background(), "resume.pdf", pdfLiteralOnly(strings.Repeat("界", 128)))
+
+	require.NoError(t, err)
+	require.True(t, utf8.ValidString(got))
+	require.LessOrEqual(t, len(got), 5)
+	require.Equal(t, "界", got)
+}
+
+func TestParserCapsPlainTextAndRTFByUTF8Bytes(t *testing.T) {
+	parser := docfile.NewParser(docfile.ParserOptions{MaxTextBytes: 5})
+
+	got, err := parser.ParseBytes(context.Background(), "notes.txt", []byte("你好世界"))
+
+	require.NoError(t, err)
+	require.True(t, utf8.ValidString(got))
+	require.LessOrEqual(t, len(got), 5)
+	require.Equal(t, "你", got)
+
+	got, err = parser.ParseBytes(context.Background(), "notes.rtf", []byte(`{\rtf1 你好世界}`))
+
+	require.NoError(t, err)
+	require.True(t, utf8.ValidString(got))
+	require.LessOrEqual(t, len(got), 5)
+	require.Equal(t, "你", got)
 }
 
 func TestParserRejectsLegacyDOC(t *testing.T) {
@@ -94,6 +153,43 @@ func TestCleanWithLimitAndSingleLineAndStripHTML(t *testing.T) {
 	require.Equal(t, "hello", cleaner.CleanWithLimit("hello world", 5))
 	require.Equal(t, "hello world", cleaner.CleanToSingleLine("hello\n\tworld"))
 	require.Equal(t, "Title & Body", cleaner.StripHTML("<h1>Title</h1><p>&amp; Body</p>"))
+}
+
+func TestCleanWithLimitUsesUTF8ByteBudget(t *testing.T) {
+	cleaner := docfile.NewTextCleaner()
+
+	got := cleaner.CleanWithLimit("你好世界", 5)
+
+	require.True(t, utf8.ValidString(got))
+	require.LessOrEqual(t, len(got), 5)
+	require.Equal(t, "你", got)
+	require.Equal(t, "éé", cleaner.CleanWithLimit("ééé", 4))
+}
+
+type boundedReadRecorder struct {
+	data         []byte
+	offset       int
+	bytesRead    int
+	maxBytesRead int
+}
+
+func (r *boundedReadRecorder) Read(p []byte) (int, error) {
+	if r.offset >= len(r.data) {
+		return 0, io.EOF
+	}
+
+	remainingAllowed := r.maxBytesRead - r.bytesRead
+	if remainingAllowed <= 0 {
+		return 0, errors.New("read past configured limit")
+	}
+	if len(p) > remainingAllowed {
+		p = p[:remainingAllowed]
+	}
+
+	n := copy(p, r.data[r.offset:])
+	r.offset += n
+	r.bytesRead += n
+	return n, nil
 }
 
 func buildDOCX(t *testing.T, paragraphs []string) []byte {
@@ -145,4 +241,8 @@ func simplePDFWithText(text string) []byte {
 	buf.WriteString(strconv.Itoa(xref))
 	buf.WriteString("\n%%EOF")
 	return buf.Bytes()
+}
+
+func pdfLiteralOnly(text string) []byte {
+	return []byte("%PDF-1.4\nBT (" + text + ") Tj ET\n%%EOF")
 }

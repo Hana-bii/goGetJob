@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/signintech/gopdf"
 )
@@ -49,6 +48,9 @@ func (e *pdfExporter) ExportReport(ctx context.Context, report Report) ([]byte, 
 
 	if e.options.FontPath != "" || len(e.options.FontBytes) > 0 {
 		return e.exportWithTTF(report)
+	}
+	if err := validateASCIIReport(report); err != nil {
+		return nil, err
 	}
 	return exportSimplePDF(report), nil
 }
@@ -161,7 +163,7 @@ func simplePDFContentStream(lines []string) string {
 	stream.WriteString("BT\n/F1 12 Tf\n72 780 Td\n14 TL\n")
 	for _, line := range lines {
 		stream.WriteString("(")
-		stream.WriteString(escapePDFText(asciiOnly(line)))
+		stream.WriteString(escapePDFText(line))
 		stream.WriteString(") Tj\nT*\n")
 	}
 	stream.WriteString("ET")
@@ -202,20 +204,32 @@ func escapePDFText(text string) string {
 	return replacer.Replace(text)
 }
 
-func asciiOnly(text string) string {
-	if utf8.RuneCountInString(text) == len(text) {
-		return text
+func validateASCIIReport(report Report) error {
+	if !isASCII(report.Title) {
+		return simplePDFASCIIError("title")
 	}
-
-	var out strings.Builder
-	for _, r := range text {
-		if r >= 32 && r <= 126 {
-			out.WriteRune(r)
-		} else {
-			out.WriteByte('?')
+	for _, section := range report.Sections {
+		if !isASCII(section.Heading) {
+			return simplePDFASCIIError("section heading")
+		}
+		if !isASCII(section.Body) {
+			return simplePDFASCIIError("section body")
 		}
 	}
-	return out.String()
+	return nil
+}
+
+func simplePDFASCIIError(field string) error {
+	return fmt.Errorf("simple PDF exporter supports ASCII only in %s; provide FontPath or FontBytes for UTF-8 content", field)
+}
+
+func isASCII(text string) bool {
+	for _, r := range text {
+		if r > 127 {
+			return false
+		}
+	}
+	return true
 }
 
 func nonEmpty(value, fallback string) string {

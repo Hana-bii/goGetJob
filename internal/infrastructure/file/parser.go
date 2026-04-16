@@ -7,10 +7,12 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"math"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	pdf "github.com/ledongthuc/pdf"
 )
@@ -51,7 +53,15 @@ func (p *Parser) ParseReader(ctx context.Context, name string, r io.Reader) (str
 	if r == nil {
 		return "", fmt.Errorf("reader is required")
 	}
-	data, err := io.ReadAll(r)
+	if p == nil {
+		p = NewParser(ParserOptions{})
+	}
+	maxSize := p.validator.MaxSizeBytes()
+	readLimit := maxSize
+	if readLimit < math.MaxInt64 {
+		readLimit++
+	}
+	data, err := io.ReadAll(io.LimitReader(r, readLimit))
 	if err != nil {
 		return "", fmt.Errorf("read document: %w", err)
 	}
@@ -76,15 +86,15 @@ func (p *Parser) ParseBytes(ctx context.Context, name string, data []byte) (stri
 
 	switch strings.ToLower(filepath.Ext(name)) {
 	case ".txt", ".md":
-		raw = string(data)
+		raw = truncateUTF8Bytes(string(data), p.maxTextBytes)
 	case ".doc":
 		return "", fmt.Errorf("legacy DOC files are not supported")
 	case ".docx":
-		raw, err = extractDOCX(data)
+		raw, err = extractDOCX(data, p.maxTextBytes)
 	case ".pdf":
-		raw, err = extractPDF(data)
+		raw, err = extractPDF(data, p.maxTextBytes)
 	case ".rtf":
-		raw = stripRTF(string(data))
+		raw = stripRTF(string(data), p.maxTextBytes)
 	default:
 		err = fmt.Errorf("unsupported file extension %q", filepath.Ext(name))
 	}
@@ -95,7 +105,7 @@ func (p *Parser) ParseBytes(ctx context.Context, name string, data []byte) (stri
 	return p.cleaner.CleanWithLimit(raw, p.maxTextBytes), nil
 }
 
-func extractDOCX(data []byte) (string, error) {
+func extractDOCX(data []byte, maxTextBytes int) (string, error) {
 	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return "", fmt.Errorf("open docx archive: %w", err)
@@ -118,7 +128,7 @@ func extractDOCX(data []byte) (string, error) {
 	}
 	defer rc.Close()
 
-	var out strings.Builder
+	out := newLimitedStringBuilder(maxTextBytes)
 	decoder := xml.NewDecoder(rc)
 	for {
 		token, err := decoder.Token()
@@ -132,29 +142,33 @@ func extractDOCX(data []byte) (string, error) {
 		switch tok := token.(type) {
 		case xml.StartElement:
 			if tok.Name.Local == "p" && out.Len() > 0 {
-				out.WriteByte('\n')
+				if out.AppendByte('\n') {
+					return out.String(), nil
+				}
 			}
 		case xml.CharData:
-			out.Write([]byte(tok))
+			if out.WriteBytes(tok) {
+				return out.String(), nil
+			}
 		}
 	}
 
 	return out.String(), nil
 }
 
-func extractPDF(data []byte) (string, error) {
+func extractPDF(data []byte, maxTextBytes int) (string, error) {
 	reader, err := pdf.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err == nil {
 		plain, plainErr := reader.GetPlainText()
 		if plainErr == nil {
-			text, readErr := io.ReadAll(plain)
+			text, readErr := readTextWithLimit(plain, maxTextBytes)
 			if readErr == nil && strings.TrimSpace(string(text)) != "" {
-				return string(text), nil
+				return text, nil
 			}
 		}
 	}
 
-	fallback := extractLiteralPDFStrings(data)
+	fallback := extractLiteralPDFStrings(data, maxTextBytes)
 	if strings.TrimSpace(fallback) != "" {
 		return fallback, nil
 	}
@@ -166,42 +180,77 @@ func extractPDF(data []byte) (string, error) {
 
 var pdfLiteralString = regexp.MustCompile(`\((?:\\.|[^\\)])*\)\s*Tj`)
 
-func extractLiteralPDFStrings(data []byte) string {
-	matches := pdfLiteralString.FindAll(data, -1)
-	lines := make([]string, 0, len(matches))
-	for _, match := range matches {
+func extractLiteralPDFStrings(data []byte, maxTextBytes int) string {
+	out := newLimitedStringBuilder(maxTextBytes)
+	remaining := data
+	for len(remaining) > 0 && !out.Capped() {
+		loc := pdfLiteralString.FindIndex(remaining)
+		if loc == nil {
+			break
+		}
+		match := remaining[loc[0]:loc[1]]
 		start := bytes.IndexByte(match, '(')
 		end := bytes.LastIndexByte(match, ')')
 		if start < 0 || end <= start {
+			remaining = remaining[loc[1]:]
 			continue
 		}
-		lines = append(lines, decodePDFLiteralString(string(match[start+1:end])))
+		if out.Len() > 0 && out.AppendByte('\n') {
+			break
+		}
+		if writeDecodedPDFLiteralString(string(match[start+1:end]), out) {
+			break
+		}
+		remaining = remaining[loc[1]:]
 	}
-	return strings.Join(lines, "\n")
+	return out.String()
 }
 
-func decodePDFLiteralString(text string) string {
-	var out strings.Builder
+func writeDecodedPDFLiteralString(text string, out *limitedStringBuilder) bool {
 	for i := 0; i < len(text); i++ {
 		if text[i] != '\\' || i == len(text)-1 {
-			out.WriteByte(text[i])
+			r, size := utf8.DecodeRuneInString(text[i:])
+			if r == utf8.RuneError && size == 1 {
+				if text[i] < utf8.RuneSelf {
+					if out.AppendByte(text[i]) {
+						return true
+					}
+				}
+				continue
+			}
+			if out.WriteString(text[i : i+size]) {
+				return true
+			}
+			i += size - 1
 			continue
 		}
 
 		i++
 		switch text[i] {
 		case 'n':
-			out.WriteByte('\n')
+			if out.AppendByte('\n') {
+				return true
+			}
 		case 'r':
-			out.WriteByte('\r')
+			if out.AppendByte('\r') {
+				return true
+			}
 		case 't':
-			out.WriteByte('\t')
+			if out.AppendByte('\t') {
+				return true
+			}
 		case 'b':
-			out.WriteByte('\b')
+			if out.AppendByte('\b') {
+				return true
+			}
 		case 'f':
-			out.WriteByte('\f')
+			if out.AppendByte('\f') {
+				return true
+			}
 		case '(', ')', '\\':
-			out.WriteByte(text[i])
+			if out.AppendByte(text[i]) {
+				return true
+			}
 		default:
 			if text[i] >= '0' && text[i] <= '7' {
 				end := i + 1
@@ -210,24 +259,158 @@ func decodePDFLiteralString(text string) string {
 				}
 				value, err := strconv.ParseInt(text[i:end], 8, 32)
 				if err == nil {
-					out.WriteByte(byte(value))
+					if out.AppendByte(byte(value)) {
+						return true
+					}
 					i = end - 1
 					continue
 				}
 			}
-			out.WriteByte(text[i])
+			if out.AppendByte(text[i]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func readTextWithLimit(r io.Reader, limit int) (string, error) {
+	if limit <= 0 {
+		data, err := io.ReadAll(r)
+		return string(data), err
+	}
+
+	data, err := io.ReadAll(io.LimitReader(r, int64(limit)+1))
+	if err != nil {
+		return "", err
+	}
+	if len(data) > limit {
+		data = []byte(truncateUTF8Bytes(string(data), limit))
+	}
+	return string(data), nil
+}
+
+func stripRTF(text string, maxTextBytes int) string {
+	out := newLimitedStringBuilder(maxTextBytes)
+	for i := 0; i < len(text) && !out.Capped(); {
+		switch text[i] {
+		case '{', '}':
+			i++
+		case '\\':
+			if strings.HasPrefix(text[i:], `\par`) {
+				if out.AppendByte('\n') {
+					return out.String()
+				}
+				i += len(`\par`)
+				if i < len(text) && text[i] == ' ' {
+					i++
+				}
+				continue
+			}
+			if strings.HasPrefix(text[i:], `\'`) {
+				i += len(`\'`)
+				for skipped := 0; skipped < 2 && i < len(text) && isHex(text[i]); skipped++ {
+					i++
+				}
+				continue
+			}
+
+			i++
+			for i < len(text) && ((text[i] >= 'a' && text[i] <= 'z') || (text[i] >= 'A' && text[i] <= 'Z')) {
+				i++
+			}
+			if i < len(text) && text[i] == '-' {
+				i++
+			}
+			for i < len(text) && text[i] >= '0' && text[i] <= '9' {
+				i++
+			}
+			if i < len(text) && text[i] == ' ' {
+				i++
+			}
+		default:
+			r, size := utf8.DecodeRuneInString(text[i:])
+			if r == utf8.RuneError && size == 1 {
+				if text[i] < utf8.RuneSelf && out.AppendByte(text[i]) {
+					return out.String()
+				}
+				i++
+				continue
+			}
+			if out.WriteString(text[i : i+size]) {
+				return out.String()
+			}
+			i += size
 		}
 	}
 	return out.String()
 }
 
-var (
-	rtfCommand = regexp.MustCompile(`\\[a-zA-Z]+\d* ?`)
-	rtfEscapes = strings.NewReplacer(`\par`, "\n", `\'`, "")
-)
+func isHex(b byte) bool {
+	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')
+}
 
-func stripRTF(text string) string {
-	text = rtfEscapes.Replace(text)
-	text = strings.NewReplacer("{", "", "}", "").Replace(text)
-	return rtfCommand.ReplaceAllString(text, "")
+type limitedStringBuilder struct {
+	builder strings.Builder
+	limit   int
+	capped  bool
+}
+
+func newLimitedStringBuilder(limit int) *limitedStringBuilder {
+	return &limitedStringBuilder{limit: limit}
+}
+
+func (b *limitedStringBuilder) Len() int {
+	return b.builder.Len()
+}
+
+func (b *limitedStringBuilder) Capped() bool {
+	return b.capped
+}
+
+func (b *limitedStringBuilder) String() string {
+	return b.builder.String()
+}
+
+func (b *limitedStringBuilder) AppendByte(value byte) bool {
+	if b.limit <= 0 {
+		b.builder.WriteByte(value)
+		return false
+	}
+	if b.builder.Len() >= b.limit {
+		b.capped = true
+		return true
+	}
+	b.builder.WriteByte(value)
+	b.capped = b.builder.Len() >= b.limit
+	return b.capped
+}
+
+func (b *limitedStringBuilder) WriteBytes(data []byte) bool {
+	return b.WriteString(string(data))
+}
+
+func (b *limitedStringBuilder) WriteString(value string) bool {
+	if value == "" {
+		return b.capped
+	}
+	if b.limit <= 0 {
+		b.builder.WriteString(value)
+		return false
+	}
+
+	remaining := b.limit - b.builder.Len()
+	if remaining <= 0 {
+		b.capped = true
+		return true
+	}
+	if len(value) <= remaining {
+		b.builder.WriteString(value)
+		b.capped = b.builder.Len() >= b.limit
+		return b.capped
+	}
+
+	b.builder.WriteString(truncateUTF8Bytes(value, remaining))
+	b.capped = true
+	return true
 }
