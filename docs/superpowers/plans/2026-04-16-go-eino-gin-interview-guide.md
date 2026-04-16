@@ -194,11 +194,11 @@ git switch -c feature/rate-limit-stream
 
 - [ ] **Step 2: Write failing tests**
 
-Test GLOBAL/IP/USER key generation, X-Forwarded-For parsing, multi-rule rejection, malformed Stream message ACK, success transition, retry transition, and failed-after-max transition.
+Test GLOBAL/IP/USER key generation, secure default IP extraction from Gin/client remote IP, trusted forwarded-header parsing (`X-Forwarded-For` first IP then `X-Real-IP` when explicitly enabled), multi-rule rejection, malformed Stream message ACK, success transition, retry transition, and failed-after-max transition.
 
 - [ ] **Step 3: Implement**
 
-Copy the original Lua sliding-window script unchanged. Implement Gin rate-limit middleware with EvalSha and NOSCRIPT reload. Implement generic Stream producer/consumer with `markProcessing`, `processBusiness`, `markCompleted`, retry, `markFailed`, and ACK.
+Copy the original Lua sliding-window script unchanged. Implement Gin rate-limit middleware with EvalSha and NOSCRIPT reload. IP dimensions must use Gin/client remote IP by default; Java-compatible `X-Forwarded-For`/`X-Real-IP` extraction is enabled only through explicit trusted-forwarded-header configuration. Implement generic Stream producer/consumer with `markProcessing`, `processBusiness`, `markCompleted`, retry, `markFailed`, and ACK.
 
 - [ ] **Step 4: Verify and commit**
 

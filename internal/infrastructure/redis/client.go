@@ -6,6 +6,8 @@ import (
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
+
+	"goGetJob/internal/common/async"
 )
 
 type Client struct {
@@ -79,14 +81,18 @@ func (c *Client) XGroupCreateMkStream(ctx context.Context, stream, group, start 
 	return err
 }
 
-func (c *Client) XReadGroup(ctx context.Context, group, consumer string, streams []string, count int64, block time.Duration) ([]XStream, error) {
-	return c.require().XReadGroup(ctx, &goredis.XReadGroupArgs{
+func (c *Client) XReadGroup(ctx context.Context, group, consumer string, streams []string, count int64, block time.Duration) ([]async.Stream, error) {
+	result, err := c.require().XReadGroup(ctx, &goredis.XReadGroupArgs{
 		Group:    group,
 		Consumer: consumer,
 		Streams:  streams,
 		Count:    count,
 		Block:    block,
 	}).Result()
+	if err != nil {
+		return nil, err
+	}
+	return asyncStreams(result), nil
 }
 
 func (c *Client) XAck(ctx context.Context, stream, group string, ids ...string) error {
@@ -102,4 +108,22 @@ func (c *Client) require() *goredis.Client {
 		panic(fmt.Sprintf("%s client is nil", "redis"))
 	}
 	return c.rdb
+}
+
+func asyncStreams(streams []goredis.XStream) []async.Stream {
+	converted := make([]async.Stream, 0, len(streams))
+	for _, stream := range streams {
+		messages := make([]async.Message, 0, len(stream.Messages))
+		for _, message := range stream.Messages {
+			messages = append(messages, async.Message{
+				ID:     message.ID,
+				Values: message.Values,
+			})
+		}
+		converted = append(converted, async.Stream{
+			Stream:   stream.Stream,
+			Messages: messages,
+		})
+	}
+	return converted
 }
