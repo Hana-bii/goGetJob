@@ -1,0 +1,77 @@
+server:
+  port: 8080
+
+app:
+  env: dev
+  name: goGetJob
+
+database:
+  dsn: ${DATABASE_DSN:}
+
+redis:
+  addr: ${REDIS_ADDR:localhost:6379}
+  db: ${REDIS_DB:0}
+
+storage:
+  endpoint: ${STORAGE_ENDPOINT:http://localhost:9000}
+  bucket: ${STORAGE_BUCKET:interview-guide}
+  access_key: ${STORAGE_ACCESS_KEY:minioadmin}
+  secret_key: ${STORAGE_SECRET_KEY:minioadmin}
+  region: ${STORAGE_REGION:us-east-1}
+
+ai:
+  default_provider: dashscope
+  providers:
+    dashscope:
+      base_url: ${AI_PROVIDER_DASHSCOPE_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode}
+      api_key: ${AI_PROVIDER_DASHSCOPE_API_KEY:}
+      model: ${AI_PROVIDER_DASHSCOPE_MODEL:qwen-plus}
+    lmstudio:
+      base_url: ${AI_PROVIDER_LMSTUDIO_BASE_URL:http://localhost:1234}
+      api_key: ${AI_PROVIDER_LMSTUDIO_API_KEY:lm-studio}
+      model: ${AI_PROVIDER_LMSTUDIO_MODEL:qwen2.5-7b-instruct}
+
+rag:
+  rewrite:
+    enabled: true
+  search:
+    short_query_length: 4
+    topk_short: 20
+    topk_medium: 12
+    topk_long: 8
+    min_score_short: 0.18
+    min_score_default: 0.28
+
+interview:
+  follow_up_count: 1
+  evaluation:
+    batch_size: 8
+
+voice:
+  llm_provider: dashscope
+  tts:
+    default_voice: siyue
+    url: wss://dashscope.aliyuncs.com/api-ws/v1/realtime
+    model: qwen3-tts-flash-realtime
+    api_key: ${AI_BAILIAN_API_KEY:}
+    voice: Cherry
+    format: pcm
+    sample_rate: 24000
+    mode: commit
+    language_type: Chinese
+    speech_rate: 1.0
+    volume: 60
+  asr:
+    url: wss://dashscope.aliyuncs.com/api-ws/v1/realtime
+    model: qwen3-asr-flash-realtime
+    api_key: ${AI_BAILIAN_API_KEY:}
+    language: zh
+    format: pcm
+    sample_rate: 16000
+    enable_turn_detection: true
+    turn_detection_type: server_vad
+    turn_detection_threshold: 0
+    turn_detection_silence_duration_ms: 2000
+
+cors:
+  allowed_origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173,http://localhost:5174,http://localhost:80}
