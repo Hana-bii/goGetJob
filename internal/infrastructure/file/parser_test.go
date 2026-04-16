@@ -101,6 +101,15 @@ func TestParserCapsDOCXExtractionByUTF8Bytes(t *testing.T) {
 	require.Equal(t, "界", got)
 }
 
+func TestParserRejectsDOCXWhenDecompressedXMLExceedsLimit(t *testing.T) {
+	parser := docfile.NewParser(docfile.ParserOptions{MaxTextBytes: 32})
+	data := buildDOCX(t, []string{strings.Repeat("a", 70*1024)})
+
+	_, err := parser.ParseBytes(context.Background(), "resume.docx", data)
+
+	require.ErrorContains(t, err, "decompressed XML")
+}
+
 func TestParserExtractsPDFText(t *testing.T) {
 	parser := docfile.NewParser(docfile.ParserOptions{})
 

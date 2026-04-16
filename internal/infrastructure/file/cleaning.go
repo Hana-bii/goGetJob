@@ -89,8 +89,21 @@ func truncateUTF8Bytes(text string, limit int) string {
 	}
 
 	end := limit
-	for end > 0 && !utf8.ValidString(text[:end]) {
-		end--
+	start := end - 1
+	for start > 0 && end-start < utf8.UTFMax && isUTF8Continuation(text[start]) {
+		start--
 	}
+
+	r, size := utf8.DecodeRuneInString(text[start:])
+	if r != utf8.RuneError || size != 1 {
+		if start+size > end {
+			end = start
+		}
+	}
+
 	return text[:end]
+}
+
+func isUTF8Continuation(b byte) bool {
+	return b&0xc0 == 0x80
 }

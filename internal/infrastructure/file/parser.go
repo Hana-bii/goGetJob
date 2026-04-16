@@ -17,7 +17,10 @@ import (
 	pdf "github.com/ledongthuc/pdf"
 )
 
-const DefaultMaxTextBytes = 5 * 1024 * 1024
+const (
+	DefaultMaxTextBytes             = 5 * 1024 * 1024
+	docxXMLDecompressionOverheadMax = int64(64 * 1024)
+)
 
 type ParserOptions struct {
 	MaxTextBytes int
@@ -128,14 +131,19 @@ func extractDOCX(data []byte, maxTextBytes int) (string, error) {
 	}
 	defer rc.Close()
 
+	xmlLimit := docxXMLDecompressedByteLimit(maxTextBytes)
+	xmlInput := &io.LimitedReader{R: rc, N: xmlLimit + 1}
 	out := newLimitedStringBuilder(maxTextBytes)
-	decoder := xml.NewDecoder(rc)
+	decoder := xml.NewDecoder(xmlInput)
 	for {
 		token, err := decoder.Token()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
+			if xmlInput.N <= 0 {
+				return "", fmt.Errorf("docx decompressed XML exceeds %d bytes", xmlLimit)
+			}
 			return "", fmt.Errorf("parse docx XML: %w", err)
 		}
 
@@ -148,12 +156,28 @@ func extractDOCX(data []byte, maxTextBytes int) (string, error) {
 			}
 		case xml.CharData:
 			if out.WriteBytes(tok) {
+				if xmlInput.N <= 0 {
+					return "", fmt.Errorf("docx decompressed XML exceeds %d bytes", xmlLimit)
+				}
 				return out.String(), nil
 			}
 		}
 	}
 
+	if xmlInput.N <= 0 {
+		return "", fmt.Errorf("docx decompressed XML exceeds %d bytes", xmlLimit)
+	}
 	return out.String(), nil
+}
+
+func docxXMLDecompressedByteLimit(maxTextBytes int) int64 {
+	if maxTextBytes <= 0 {
+		maxTextBytes = DefaultMaxTextBytes
+	}
+	if int64(maxTextBytes) > math.MaxInt64-docxXMLDecompressionOverheadMax-1 {
+		return math.MaxInt64 - 1
+	}
+	return int64(maxTextBytes) + docxXMLDecompressionOverheadMax
 }
 
 func extractPDF(data []byte, maxTextBytes int) (string, error) {
