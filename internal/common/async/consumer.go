@@ -3,6 +3,7 @@ package async
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -110,12 +111,11 @@ func (c *Consumer[T]) processMessage(ctx context.Context, message Message) error
 	if c.handler.ProcessBusiness != nil {
 		if err := c.handler.ProcessBusiness(ctx, payload); err != nil {
 			if retry >= c.options.MaxRetries {
+				var markErr error
 				if c.handler.MarkFailed != nil {
-					if markErr := c.handler.MarkFailed(ctx, payload, err); markErr != nil {
-						return markErr
-					}
+					markErr = c.handler.MarkFailed(ctx, payload, err)
 				}
-				return c.ack(ctx, message.ID)
+				return errors.Join(markErr, c.ack(ctx, message.ID))
 			}
 			if _, addErr := c.client.XAdd(ctx, c.options.Stream, map[string]any{
 				FieldPayload: encoded,

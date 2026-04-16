@@ -61,7 +61,7 @@ func TestRateLimitBuildsGlobalIPAndUserKeys(t *testing.T) {
 		c.Set("userId", "ctx-user")
 		c.Next()
 	})
-	router.Use(middleware.RateLimit("KnowledgeBaseController.Query", redis,
+	router.Use(middleware.RateLimitWithOptions("KnowledgeBaseController.Query", redis, middleware.RateLimitOptions{TrustForwardedHeaders: true},
 		middleware.Rule{Dimension: middleware.DimensionGlobal, Limit: 10, Window: time.Minute},
 		middleware.Rule{Dimension: middleware.DimensionIP, Limit: 5, Window: time.Minute},
 		middleware.Rule{Dimension: middleware.DimensionUser, Limit: 3, Window: time.Minute},
@@ -84,6 +84,30 @@ func TestRateLimitBuildsGlobalIPAndUserKeys(t *testing.T) {
 	require.Equal(t, []string{"ratelimit:{KnowledgeBaseController.Query}:user:ctx-user"}, redis.calls[2].keys)
 }
 
+func TestRateLimitUsesClientIPByDefaultWhenForwardedHeaderIsSpoofed(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	redis := &fakeRateLimitRedis{sha: "loaded-sha"}
+	router := gin.New()
+	router.Use(middleware.RateLimit("KnowledgeBaseController.Query", redis,
+		middleware.Rule{Dimension: middleware.DimensionIP, Limit: 5, Window: time.Minute},
+	))
+	router.GET("/query", func(c *gin.Context) {
+		c.Status(http.StatusNoContent)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/query", nil)
+	req.RemoteAddr = "192.0.2.55:4321"
+	req.Header.Set("X-Forwarded-For", "203.0.113.9")
+	req.Header.Set("X-Real-IP", "198.51.100.7")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNoContent, w.Code)
+	require.Len(t, redis.calls, 1)
+	require.Equal(t, []string{"ratelimit:{KnowledgeBaseController.Query}:ip:192.0.2.55"}, redis.calls[0].keys)
+}
+
 func TestRateLimitRejectsWhenAnyRuleIsExceeded(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	redis := &fakeRateLimitRedis{sha: "loaded-sha", evalValues: []any{int64(1), int64(1), int64(0)}}
@@ -93,7 +117,9 @@ func TestRateLimitRejectsWhenAnyRuleIsExceeded(t *testing.T) {
 		middleware.Rule{Dimension: middleware.DimensionIP, Limit: 5, Window: time.Minute},
 		middleware.Rule{Dimension: middleware.DimensionUser, Limit: 3, Window: time.Minute},
 	))
+	handlerCalled := false
 	router.POST("/submit", func(c *gin.Context) {
+		handlerCalled = true
 		c.Status(http.StatusNoContent)
 	})
 
@@ -107,6 +133,7 @@ func TestRateLimitRejectsWhenAnyRuleIsExceeded(t *testing.T) {
 	require.JSONEq(t, `{"code":429,"message":"RATE_LIMIT_EXCEEDED","data":null}`, w.Body.String())
 	require.Len(t, redis.calls, 3)
 	require.Equal(t, []string{"ratelimit:{InterviewController.Submit}:user:header-user"}, redis.calls[2].keys)
+	require.False(t, handlerCalled)
 }
 
 func TestRateLimitReloadsScriptOnNoScript(t *testing.T) {

@@ -45,20 +45,30 @@ type RateLimitRedis interface {
 	EvalSHA(ctx context.Context, sha string, keys []string, args ...any) (any, error)
 }
 
+type RateLimitOptions struct {
+	TrustForwardedHeaders bool
+}
+
 func RateLimit(action string, redis RateLimitRedis, rules ...Rule) gin.HandlerFunc {
+	return RateLimitWithOptions(action, redis, RateLimitOptions{}, rules...)
+}
+
+func RateLimitWithOptions(action string, redis RateLimitRedis, options RateLimitOptions, rules ...Rule) gin.HandlerFunc {
 	limiter := &rateLimiter{
-		action: action,
-		redis:  redis,
-		rules:  append([]Rule(nil), rules...),
+		action:                action,
+		redis:                 redis,
+		rules:                 append([]Rule(nil), rules...),
+		trustForwardedHeaders: options.TrustForwardedHeaders,
 	}
 
 	return limiter.handle
 }
 
 type rateLimiter struct {
-	action string
-	redis  RateLimitRedis
-	rules  []Rule
+	action                string
+	redis                 RateLimitRedis
+	rules                 []Rule
+	trustForwardedHeaders bool
 
 	mu  sync.Mutex
 	sha string
@@ -131,7 +141,7 @@ func (l *rateLimiter) key(c *gin.Context, rule Rule) string {
 	base := "ratelimit:{" + l.action + "}:"
 	switch rule.Dimension {
 	case DimensionIP:
-		return base + "ip:" + clientIP(c)
+		return base + "ip:" + clientIP(c, l.trustForwardedHeaders)
 	case DimensionUser:
 		return base + "user:" + userID(c)
 	default:
@@ -158,14 +168,16 @@ func (l *rateLimiter) args(rule Rule) []any {
 	}
 }
 
-func clientIP(c *gin.Context) string {
-	if forwarded := c.GetHeader("X-Forwarded-For"); forwarded != "" {
-		if first := strings.TrimSpace(strings.Split(forwarded, ",")[0]); first != "" {
-			return first
+func clientIP(c *gin.Context, trustForwardedHeaders bool) string {
+	if trustForwardedHeaders {
+		if forwarded := c.GetHeader("X-Forwarded-For"); forwarded != "" {
+			if first := strings.TrimSpace(strings.Split(forwarded, ",")[0]); first != "" {
+				return first
+			}
 		}
-	}
-	if realIP := strings.TrimSpace(c.GetHeader("X-Real-IP")); realIP != "" {
-		return realIP
+		if realIP := strings.TrimSpace(c.GetHeader("X-Real-IP")); realIP != "" {
+			return realIP
+		}
 	}
 	if ip, _, err := net.SplitHostPort(c.Request.RemoteAddr); err == nil && ip != "" {
 		return ip

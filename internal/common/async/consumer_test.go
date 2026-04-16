@@ -147,6 +147,29 @@ func TestConsumerMarksFailedAfterMaxRetries(t *testing.T) {
 	require.Empty(t, client.added)
 }
 
+func TestConsumerAcksTerminalMessageWhenMarkFailedFails(t *testing.T) {
+	client := &fakeStreamClient{streams: []async.Stream{streamWithPayload("1-0", `{"id":"resume-1"}`, 3)}}
+	consumer := async.NewConsumer[streamPayload](client, async.ConsumerOptions{
+		Stream:     "resume.analyze",
+		Group:      "workers",
+		Consumer:   "worker-1",
+		MaxRetries: 3,
+	}, async.Handler[streamPayload]{
+		ProcessBusiness: func(ctx context.Context, payload streamPayload) error {
+			return errors.New("permanent failure")
+		},
+		MarkFailed: func(ctx context.Context, payload streamPayload, cause error) error {
+			return errors.New("failed to persist final status")
+		},
+	})
+
+	err := consumer.ProcessOnce(context.Background())
+
+	require.EqualError(t, err, "failed to persist final status")
+	require.Equal(t, []string{"1-0"}, client.acked)
+	require.Empty(t, client.added)
+}
+
 func streamWithPayload(id, payload string, retry int) async.Stream {
 	return async.Stream{
 		Stream: "resume.analyze",
