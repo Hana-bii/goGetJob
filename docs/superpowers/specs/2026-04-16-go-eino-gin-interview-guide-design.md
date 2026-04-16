@@ -328,7 +328,9 @@ rateLimited.POST(
 Dimensions:
 
 - GLOBAL: all requests.
-- IP: client IP from `X-Forwarded-For`, `X-Real-IP`, or remote address.
+- IP: Gin/client remote IP by default. When trusted forwarded headers are
+  explicitly enabled for deployments behind a trusted proxy, use
+  `X-Forwarded-For` first IP, then `X-Real-IP`, then the client remote IP.
 - USER: `X-User-Id` or context user ID; anonymous fallback.
 
 Each rule is evaluated independently. Any failure rejects the request with

@@ -53,7 +53,7 @@ func (f *fakeRateLimitRedis) EvalSHA(ctx context.Context, sha string, keys []str
 	return int64(1), nil
 }
 
-func TestRateLimitBuildsGlobalIPAndUserKeys(t *testing.T) {
+func TestRateLimitTrustedForwardedHeadersBuildsGlobalIPAndUserKeys(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	redis := &fakeRateLimitRedis{sha: "loaded-sha"}
 	router := gin.New()
@@ -82,6 +82,29 @@ func TestRateLimitBuildsGlobalIPAndUserKeys(t *testing.T) {
 	require.Equal(t, []string{"ratelimit:{KnowledgeBaseController.Query}:global"}, redis.calls[0].keys)
 	require.Equal(t, []string{"ratelimit:{KnowledgeBaseController.Query}:ip:203.0.113.9"}, redis.calls[1].keys)
 	require.Equal(t, []string{"ratelimit:{KnowledgeBaseController.Query}:user:ctx-user"}, redis.calls[2].keys)
+}
+
+func TestRateLimitTrustedForwardedHeadersUsesRealIPWhenForwardedForMissing(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	redis := &fakeRateLimitRedis{sha: "loaded-sha"}
+	router := gin.New()
+	router.Use(middleware.RateLimitWithOptions("KnowledgeBaseController.Query", redis, middleware.RateLimitOptions{TrustForwardedHeaders: true},
+		middleware.Rule{Dimension: middleware.DimensionIP, Limit: 5, Window: time.Minute},
+	))
+	router.GET("/query", func(c *gin.Context) {
+		c.Status(http.StatusNoContent)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/query", nil)
+	req.RemoteAddr = "192.0.2.55:4321"
+	req.Header.Set("X-Real-IP", "198.51.100.7")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNoContent, w.Code)
+	require.Len(t, redis.calls, 1)
+	require.Equal(t, []string{"ratelimit:{KnowledgeBaseController.Query}:ip:198.51.100.7"}, redis.calls[0].keys)
 }
 
 func TestRateLimitUsesClientIPByDefaultWhenForwardedHeaderIsSpoofed(t *testing.T) {
