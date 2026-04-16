@@ -1,7 +1,6 @@
 package config
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -254,18 +253,18 @@ func Load(path string) (*Config, error) {
 
 	if strings.TrimSpace(path) != "" {
 		raw, err := os.ReadFile(path)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err != nil {
 			return nil, fmt.Errorf("read config: %w", err)
 		}
-		if err == nil {
-			expanded := expandPlaceholders(raw)
-			if err := yaml.Unmarshal(expanded, &cfg); err != nil {
-				return nil, fmt.Errorf("parse config: %w", err)
-			}
+		expanded := expandPlaceholders(raw)
+		if err := yaml.Unmarshal(expanded, &cfg); err != nil {
+			return nil, fmt.Errorf("parse config: %w", err)
 		}
 	}
 
-	applyEnvOverrides(&cfg)
+	if err := applyEnvOverrides(&cfg); err != nil {
+		return nil, err
+	}
 	normalize(&cfg)
 
 	return &cfg, nil
@@ -291,13 +290,17 @@ func expandPlaceholders(raw []byte) []byte {
 	})
 }
 
-func applyEnvOverrides(cfg *Config) {
-	overrideInt("SERVER_PORT", &cfg.Server.Port)
+func applyEnvOverrides(cfg *Config) error {
+	if err := overrideInt("SERVER_PORT", &cfg.Server.Port); err != nil {
+		return err
+	}
 	overrideString("APP_ENV", &cfg.App.Env)
 	overrideString("APP_NAME", &cfg.App.Name)
 	overrideString("DATABASE_DSN", &cfg.Database.DSN)
 	overrideString("REDIS_ADDR", &cfg.Redis.Addr)
-	overrideInt("REDIS_DB", &cfg.Redis.DB)
+	if err := overrideInt("REDIS_DB", &cfg.Redis.DB); err != nil {
+		return err
+	}
 	overrideString("STORAGE_ENDPOINT", &cfg.Storage.Endpoint)
 	overrideString("STORAGE_BUCKET", &cfg.Storage.Bucket)
 	overrideString("STORAGE_ACCESS_KEY", &cfg.Storage.AccessKey)
@@ -315,15 +318,33 @@ func applyEnvOverrides(cfg *Config) {
 	overrideString("AI_PROVIDER_LMSTUDIO_API_KEY", &lmstudio.APIKey)
 	overrideString("AI_PROVIDER_LMSTUDIO_MODEL", &lmstudio.Model)
 	cfg.AI.Providers["lmstudio"] = lmstudio
-	overrideBool("RAG_REWRITE_ENABLED", &cfg.RAG.Rewrite.Enabled)
-	overrideInt("RAG_SHORT_QUERY_LENGTH", &cfg.RAG.Search.ShortQueryLength)
-	overrideInt("RAG_TOPK_SHORT", &cfg.RAG.Search.TopKShort)
-	overrideInt("RAG_TOPK_MEDIUM", &cfg.RAG.Search.TopKMedium)
-	overrideInt("RAG_TOPK_LONG", &cfg.RAG.Search.TopKLong)
-	overrideFloat("RAG_MIN_SCORE_SHORT", &cfg.RAG.Search.MinScoreShort)
-	overrideFloat("RAG_MIN_SCORE_DEFAULT", &cfg.RAG.Search.MinScoreDefault)
-	overrideInt("INTERVIEW_FOLLOW_UP_COUNT", &cfg.Interview.FollowUpCount)
-	overrideInt("INTERVIEW_EVALUATION_BATCH_SIZE", &cfg.Interview.Evaluation.BatchSize)
+	if err := overrideBool("RAG_REWRITE_ENABLED", &cfg.RAG.Rewrite.Enabled); err != nil {
+		return err
+	}
+	if err := overrideInt("RAG_SHORT_QUERY_LENGTH", &cfg.RAG.Search.ShortQueryLength); err != nil {
+		return err
+	}
+	if err := overrideInt("RAG_TOPK_SHORT", &cfg.RAG.Search.TopKShort); err != nil {
+		return err
+	}
+	if err := overrideInt("RAG_TOPK_MEDIUM", &cfg.RAG.Search.TopKMedium); err != nil {
+		return err
+	}
+	if err := overrideInt("RAG_TOPK_LONG", &cfg.RAG.Search.TopKLong); err != nil {
+		return err
+	}
+	if err := overrideFloat("RAG_MIN_SCORE_SHORT", &cfg.RAG.Search.MinScoreShort); err != nil {
+		return err
+	}
+	if err := overrideFloat("RAG_MIN_SCORE_DEFAULT", &cfg.RAG.Search.MinScoreDefault); err != nil {
+		return err
+	}
+	if err := overrideInt("INTERVIEW_FOLLOW_UP_COUNT", &cfg.Interview.FollowUpCount); err != nil {
+		return err
+	}
+	if err := overrideInt("INTERVIEW_EVALUATION_BATCH_SIZE", &cfg.Interview.Evaluation.BatchSize); err != nil {
+		return err
+	}
 	overrideString("VOICE_LLM_PROVIDER", &cfg.Voice.LLMProvider)
 	overrideString("VOICE_TTS_DEFAULT_VOICE", &cfg.Voice.TTS.DefaultVoice)
 	overrideString("VOICE_ASR_URL", &cfg.Voice.ASR.URL)
@@ -331,22 +352,37 @@ func applyEnvOverrides(cfg *Config) {
 	overrideString("VOICE_ASR_API_KEY", &cfg.Voice.ASR.APIKey)
 	overrideString("VOICE_ASR_LANGUAGE", &cfg.Voice.ASR.Language)
 	overrideString("VOICE_ASR_FORMAT", &cfg.Voice.ASR.Format)
-	overrideInt("VOICE_ASR_SAMPLE_RATE", &cfg.Voice.ASR.SampleRate)
-	overrideBool("VOICE_ASR_ENABLE_TURN_DETECTION", &cfg.Voice.ASR.EnableTurnDetection)
+	if err := overrideInt("VOICE_ASR_SAMPLE_RATE", &cfg.Voice.ASR.SampleRate); err != nil {
+		return err
+	}
+	if err := overrideBool("VOICE_ASR_ENABLE_TURN_DETECTION", &cfg.Voice.ASR.EnableTurnDetection); err != nil {
+		return err
+	}
 	overrideString("VOICE_ASR_TURN_DETECTION_TYPE", &cfg.Voice.ASR.TurnDetectionType)
-	overrideFloat("VOICE_ASR_TURN_DETECTION_THRESHOLD", &cfg.Voice.ASR.TurnDetectionThreshold)
-	overrideInt("VOICE_ASR_TURN_DETECTION_SILENCE_MS", &cfg.Voice.ASR.TurnDetectionSilenceMillis)
+	if err := overrideFloat("VOICE_ASR_TURN_DETECTION_THRESHOLD", &cfg.Voice.ASR.TurnDetectionThreshold); err != nil {
+		return err
+	}
+	if err := overrideInt("VOICE_ASR_TURN_DETECTION_SILENCE_MS", &cfg.Voice.ASR.TurnDetectionSilenceMillis); err != nil {
+		return err
+	}
 	overrideString("VOICE_TTS_URL", &cfg.Voice.TTS.URL)
 	overrideString("VOICE_TTS_MODEL", &cfg.Voice.TTS.Model)
 	overrideString("VOICE_TTS_API_KEY", &cfg.Voice.TTS.APIKey)
 	overrideString("VOICE_TTS_VOICE", &cfg.Voice.TTS.Voice)
 	overrideString("VOICE_TTS_FORMAT", &cfg.Voice.TTS.Format)
-	overrideInt("VOICE_TTS_SAMPLE_RATE", &cfg.Voice.TTS.SampleRate)
+	if err := overrideInt("VOICE_TTS_SAMPLE_RATE", &cfg.Voice.TTS.SampleRate); err != nil {
+		return err
+	}
 	overrideString("VOICE_TTS_MODE", &cfg.Voice.TTS.Mode)
 	overrideString("VOICE_TTS_LANGUAGE_TYPE", &cfg.Voice.TTS.LanguageType)
-	overrideFloat("VOICE_TTS_SPEECH_RATE", &cfg.Voice.TTS.SpeechRate)
-	overrideInt("VOICE_TTS_VOLUME", &cfg.Voice.TTS.Volume)
+	if err := overrideFloat("VOICE_TTS_SPEECH_RATE", &cfg.Voice.TTS.SpeechRate); err != nil {
+		return err
+	}
+	if err := overrideInt("VOICE_TTS_VOLUME", &cfg.Voice.TTS.Volume); err != nil {
+		return err
+	}
 	overrideStringSlice("CORS_ALLOWED_ORIGINS", &cfg.CORS.AllowedOrigins)
+	return nil
 }
 
 func normalize(cfg *Config) {
@@ -460,28 +496,37 @@ func overrideString(key string, target *string) {
 	}
 }
 
-func overrideInt(key string, target *int) {
+func overrideInt(key string, target *int) error {
 	if value, ok := os.LookupEnv(key); ok {
-		if parsed, err := strconv.Atoi(value); err == nil {
-			*target = parsed
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("invalid env %s: %w", key, err)
 		}
+		*target = parsed
 	}
+	return nil
 }
 
-func overrideBool(key string, target *bool) {
+func overrideBool(key string, target *bool) error {
 	if value, ok := os.LookupEnv(key); ok {
-		if parsed, err := strconv.ParseBool(value); err == nil {
-			*target = parsed
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("invalid env %s: %w", key, err)
 		}
+		*target = parsed
 	}
+	return nil
 }
 
-func overrideFloat(key string, target *float64) {
+func overrideFloat(key string, target *float64) error {
 	if value, ok := os.LookupEnv(key); ok {
-		if parsed, err := strconv.ParseFloat(value, 64); err == nil {
-			*target = parsed
+		parsed, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return fmt.Errorf("invalid env %s: %w", key, err)
 		}
+		*target = parsed
 	}
+	return nil
 }
 
 func overrideStringSlice(key string, target *[]string) {

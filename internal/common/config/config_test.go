@@ -34,6 +34,28 @@ func TestLoadConfigUsesDefaults(t *testing.T) {
 	require.Equal(t, "siyue", cfg.Voice.TTS.DefaultVoice)
 }
 
+func TestLoadConfigReturnsErrorForMissingExplicitFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing.yaml")
+
+	cfg, err := config.Load(path)
+
+	require.Error(t, err)
+	require.Nil(t, cfg)
+}
+
+func TestLoadConfigReturnsErrorForInvalidTypedEnvOverride(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("server:\n  port: 8080\n"), 0o600))
+
+	t.Setenv("SERVER_PORT", "abc")
+
+	cfg, err := config.Load(path)
+
+	require.Error(t, err)
+	require.Nil(t, cfg)
+}
+
 func TestLoadConfigExpandsEnvironmentOverrides(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
