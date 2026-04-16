@@ -81,11 +81,22 @@ func (c *Consumer[T]) Run(ctx context.Context) error {
 }
 
 func (c *Consumer[T]) ProcessOnce(ctx context.Context) error {
+	pending, err := c.client.XReadGroup(ctx, c.options.Group, c.options.Consumer, []string{c.options.Stream, "0"}, c.options.Count, 0)
+	if err != nil {
+		return err
+	}
+	if hasMessages(pending) {
+		return c.processStreams(ctx, pending)
+	}
+
 	streams, err := c.client.XReadGroup(ctx, c.options.Group, c.options.Consumer, []string{c.options.Stream, ">"}, c.options.Count, c.options.Block)
 	if err != nil {
 		return err
 	}
+	return c.processStreams(ctx, streams)
+}
 
+func (c *Consumer[T]) processStreams(ctx context.Context, streams []Stream) error {
 	for _, stream := range streams {
 		for _, message := range stream.Messages {
 			if err := c.processMessage(ctx, message); err != nil {
@@ -94,6 +105,15 @@ func (c *Consumer[T]) ProcessOnce(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func hasMessages(streams []Stream) bool {
+	for _, stream := range streams {
+		if len(stream.Messages) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Consumer[T]) processMessage(ctx context.Context, message Message) error {

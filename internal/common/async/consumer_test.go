@@ -16,10 +16,13 @@ type streamPayload struct {
 }
 
 type fakeStreamClient struct {
-	streams []async.Stream
-	added   []xaddCall
-	acked   []string
-	groups  []string
+	streams       []async.Stream
+	readResponses [][]async.Stream
+	readCalls     []readGroupCall
+	addErrs       []error
+	added         []xaddCall
+	acked         []string
+	groups        []string
 }
 
 type xaddCall struct {
@@ -27,8 +30,21 @@ type xaddCall struct {
 	values map[string]any
 }
 
+type readGroupCall struct {
+	streams []string
+	count   int64
+	block   time.Duration
+}
+
 func (f *fakeStreamClient) XAdd(ctx context.Context, stream string, values map[string]any) (string, error) {
 	f.added = append(f.added, xaddCall{stream: stream, values: values})
+	if len(f.addErrs) > 0 {
+		err := f.addErrs[0]
+		f.addErrs = f.addErrs[1:]
+		if err != nil {
+			return "", err
+		}
+	}
 	return "new-id", nil
 }
 
@@ -38,6 +54,12 @@ func (f *fakeStreamClient) XGroupCreateMkStream(ctx context.Context, stream, gro
 }
 
 func (f *fakeStreamClient) XReadGroup(ctx context.Context, group, consumer string, streams []string, count int64, block time.Duration) ([]async.Stream, error) {
+	f.readCalls = append(f.readCalls, readGroupCall{streams: append([]string(nil), streams...), count: count, block: block})
+	if len(f.readResponses) > 0 {
+		response := f.readResponses[0]
+		f.readResponses = f.readResponses[1:]
+		return response, nil
+	}
 	return f.streams, nil
 }
 
@@ -96,6 +118,132 @@ func TestConsumerMarksSuccessfulMessageCompletedAndAcks(t *testing.T) {
 	require.Equal(t, []string{"processing:resume-1", "business:resume-1", "completed:resume-1"}, calls)
 	require.Equal(t, []string{"1-0"}, client.acked)
 	require.Empty(t, client.added)
+}
+
+func TestConsumerProcessesPendingMessagesBeforeNewMessages(t *testing.T) {
+	client := &fakeStreamClient{readResponses: [][]async.Stream{
+		{streamWithPayload("1-0", `{"id":"pending"}`, 0)},
+	}}
+	var processed []string
+	consumer := async.NewConsumer[streamPayload](client, async.ConsumerOptions{
+		Stream:   "resume.analyze",
+		Group:    "workers",
+		Consumer: "worker-1",
+		Count:    5,
+		Block:    time.Second,
+	}, async.Handler[streamPayload]{
+		ProcessBusiness: func(ctx context.Context, payload streamPayload) error {
+			processed = append(processed, payload.ID)
+			return nil
+		},
+	})
+
+	err := consumer.ProcessOnce(context.Background())
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"pending"}, processed)
+	require.Equal(t, []string{"1-0"}, client.acked)
+	require.Len(t, client.readCalls, 1)
+	require.Equal(t, []string{"resume.analyze", "0"}, client.readCalls[0].streams)
+	require.Zero(t, client.readCalls[0].block)
+	require.Equal(t, int64(5), client.readCalls[0].count)
+}
+
+func TestConsumerReadsNewMessagesWhenNoPendingMessagesExist(t *testing.T) {
+	client := &fakeStreamClient{readResponses: [][]async.Stream{
+		nil,
+		{streamWithPayload("2-0", `{"id":"new"}`, 0)},
+	}}
+	var processed []string
+	consumer := async.NewConsumer[streamPayload](client, async.ConsumerOptions{
+		Stream:   "resume.analyze",
+		Group:    "workers",
+		Consumer: "worker-1",
+		Count:    5,
+		Block:    time.Second,
+	}, async.Handler[streamPayload]{
+		ProcessBusiness: func(ctx context.Context, payload streamPayload) error {
+			processed = append(processed, payload.ID)
+			return nil
+		},
+	})
+
+	err := consumer.ProcessOnce(context.Background())
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"new"}, processed)
+	require.Equal(t, []string{"2-0"}, client.acked)
+	require.Len(t, client.readCalls, 2)
+	require.Equal(t, []string{"resume.analyze", "0"}, client.readCalls[0].streams)
+	require.Zero(t, client.readCalls[0].block)
+	require.Equal(t, []string{"resume.analyze", ">"}, client.readCalls[1].streams)
+	require.Equal(t, time.Second, client.readCalls[1].block)
+}
+
+func TestConsumerRecoversPendingMessageAfterMarkCompletedFailure(t *testing.T) {
+	client := &fakeStreamClient{readResponses: [][]async.Stream{
+		nil,
+		{streamWithPayload("2-0", `{"id":"resume-1"}`, 0)},
+		{streamWithPayload("2-0", `{"id":"resume-1"}`, 0)},
+	}}
+	completionAttempts := 0
+	consumer := async.NewConsumer[streamPayload](client, async.ConsumerOptions{
+		Stream:   "resume.analyze",
+		Group:    "workers",
+		Consumer: "worker-1",
+	}, async.Handler[streamPayload]{
+		MarkCompleted: func(ctx context.Context, payload streamPayload) error {
+			completionAttempts++
+			if completionAttempts == 1 {
+				return errors.New("status store unavailable")
+			}
+			return nil
+		},
+	})
+
+	err := consumer.ProcessOnce(context.Background())
+	require.EqualError(t, err, "status store unavailable")
+	require.Empty(t, client.acked)
+
+	err = consumer.ProcessOnce(context.Background())
+
+	require.NoError(t, err)
+	require.Equal(t, 2, completionAttempts)
+	require.Equal(t, []string{"2-0"}, client.acked)
+	require.Len(t, client.readCalls, 3)
+	require.Equal(t, []string{"resume.analyze", "0"}, client.readCalls[2].streams)
+}
+
+func TestConsumerRecoversPendingMessageAfterRetryEnqueueFailure(t *testing.T) {
+	client := &fakeStreamClient{
+		readResponses: [][]async.Stream{
+			nil,
+			{streamWithPayload("2-0", `{"id":"resume-1"}`, 1)},
+			{streamWithPayload("2-0", `{"id":"resume-1"}`, 1)},
+		},
+		addErrs: []error{errors.New("redis write unavailable"), nil},
+	}
+	consumer := async.NewConsumer[streamPayload](client, async.ConsumerOptions{
+		Stream:     "resume.analyze",
+		Group:      "workers",
+		Consumer:   "worker-1",
+		MaxRetries: 3,
+	}, async.Handler[streamPayload]{
+		ProcessBusiness: func(ctx context.Context, payload streamPayload) error {
+			return errors.New("temporary failure")
+		},
+	})
+
+	err := consumer.ProcessOnce(context.Background())
+	require.EqualError(t, err, "redis write unavailable")
+	require.Empty(t, client.acked)
+
+	err = consumer.ProcessOnce(context.Background())
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"2-0"}, client.acked)
+	require.Len(t, client.added, 2)
+	require.Equal(t, 2, client.added[1].values[async.FieldRetry])
 }
 
 func TestConsumerReenqueuesFailedMessageUntilMaxRetries(t *testing.T) {

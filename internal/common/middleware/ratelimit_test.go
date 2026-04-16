@@ -5,6 +5,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +20,7 @@ import (
 type fakeRateLimitRedis struct {
 	sha        string
 	loads      int
+	scripts    []string
 	evalErrs   []error
 	evalValues []any
 	calls      []rateLimitCall
@@ -30,6 +34,7 @@ type rateLimitCall struct {
 
 func (f *fakeRateLimitRedis) ScriptLoad(ctx context.Context, script string) (string, error) {
 	f.loads++
+	f.scripts = append(f.scripts, script)
 	if f.sha == "" {
 		f.sha = "sha-1"
 	}
@@ -180,4 +185,40 @@ func TestRateLimitReloadsScriptOnNoScript(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, w.Code)
 	require.Equal(t, 2, redis.loads)
 	require.Len(t, redis.calls, 2)
+}
+
+func TestRateLimitLoadsEmbeddedScriptWhenSourceFileIsUnavailable(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	redis := &fakeRateLimitRedis{sha: "loaded-sha"}
+	scriptPath := rateLimitScriptSourcePath(t)
+	backupPath := scriptPath + ".testbackup"
+	require.NoError(t, os.Rename(scriptPath, backupPath))
+	t.Cleanup(func() {
+		require.NoError(t, os.Rename(backupPath, scriptPath))
+	})
+	t.Chdir(t.TempDir())
+
+	router := gin.New()
+	router.Use(middleware.RateLimit("KnowledgeBaseController.Query", redis,
+		middleware.Rule{Dimension: middleware.DimensionGlobal, Limit: 1, Window: time.Minute},
+	))
+	router.GET("/query", func(c *gin.Context) {
+		c.Status(http.StatusNoContent)
+	})
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/query", nil))
+
+	require.Equal(t, http.StatusNoContent, w.Code)
+	require.Len(t, redis.scripts, 1)
+	require.Contains(t, redis.scripts[0], "redis.call")
+	require.NotEmpty(t, strings.TrimSpace(redis.scripts[0]))
+}
+
+func rateLimitScriptSourcePath(t *testing.T) string {
+	t.Helper()
+
+	wd, err := os.Getwd()
+	require.NoError(t, err)
+	return filepath.Clean(filepath.Join(wd, "..", "..", "infrastructure", "redis", "scripts", "rate_limit_single.lua"))
 }

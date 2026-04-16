@@ -6,9 +6,6 @@ import (
 	"encoding/hex"
 	"net"
 	"net/http"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,6 +21,52 @@ const (
 	rateLimitExceededMessage = "RATE_LIMIT_EXCEEDED"
 	defaultPermits           = 1
 )
+
+const rateLimitScript = `
+local key = KEYS[1]
+local now_ms = tonumber(ARGV[1])
+local permits = tonumber(ARGV[2])
+local interval = tonumber(ARGV[3])
+local max_tokens = tonumber(ARGV[4])
+local request_id = ARGV[5]
+
+local value_key = key .. ":value"
+local permits_key = key .. ":permits"
+
+local current_val = tonumber(redis.call("get", value_key)) or max_tokens
+
+local expired_values = redis.call("zrangebyscore", permits_key, 0, now_ms - interval)
+if #expired_values > 0 then
+    local expired_count = 0
+    for _, v in ipairs(expired_values) do
+        local p = tonumber(string.match(v, ":(%d+)$"))
+        if p then
+            expired_count = expired_count + p
+        end
+    end
+
+    redis.call("zremrangebyscore", permits_key, 0, now_ms - interval)
+
+    if expired_count > 0 then
+        current_val = math.min(max_tokens, current_val + expired_count)
+    end
+end
+
+if current_val < permits then
+    return 0
+end
+
+local permit_record = request_id .. ":" .. permits
+redis.call("zadd", permits_key, now_ms, permit_record)
+redis.call("set", value_key, current_val - permits)
+
+local expire_time = math.ceil(interval * 2 / 1000)
+if expire_time < 1 then expire_time = 1 end
+redis.call("expire", value_key, expire_time)
+redis.call("expire", permits_key, expire_time)
+
+return 1
+`
 
 type Dimension string
 
@@ -233,16 +276,5 @@ func requestID() string {
 }
 
 func loadRateLimitScript() (string, error) {
-	relative := filepath.Join("internal", "infrastructure", "redis", "scripts", "rate_limit_single.lua")
-	if data, err := os.ReadFile(relative); err == nil {
-		return string(data), nil
-	}
-
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		return "", os.ErrNotExist
-	}
-	root := filepath.Clean(filepath.Join(filepath.Dir(filename), "..", "..", ".."))
-	data, err := os.ReadFile(filepath.Join(root, relative))
-	return string(data), err
+	return rateLimitScript, nil
 }
