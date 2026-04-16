@@ -3,6 +3,7 @@ package ai
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -27,6 +28,9 @@ type StructuredOptions struct {
 }
 
 func InvokeStructured[T any](ctx context.Context, model ChatModel, prompt string, target *T, opts StructuredOptions) error {
+	if err := ctx.Err(); err != nil {
+		return structuredContextError(err)
+	}
 	if model == nil {
 		return apperrors.NewBusinessError(apperrors.CodeInternal, "structured output model is required", nil)
 	}
@@ -45,6 +49,10 @@ func InvokeStructured[T any](ctx context.Context, model ChatModel, prompt string
 
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return structuredContextError(err)
+		}
+
 		content := prompt
 		if attempt > 1 {
 			content = prompt + "\n\n" + repairInstruction
@@ -55,6 +63,9 @@ func InvokeStructured[T any](ctx context.Context, model ChatModel, prompt string
 
 		raw, err := model.Generate(ctx, []ChatMessage{{Role: "user", Content: content}})
 		if err != nil {
+			if isContextDone(err) {
+				return structuredContextError(err)
+			}
 			lastErr = err
 			continue
 		}
@@ -70,6 +81,14 @@ func InvokeStructured[T any](ctx context.Context, model ChatModel, prompt string
 		fmt.Sprintf("structured output failed after %d attempt(s)", maxAttempts),
 		lastErr,
 	)
+}
+
+func isContextDone(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+func structuredContextError(err error) error {
+	return apperrors.NewBusinessError(apperrors.CodeInternal, "structured output canceled", err)
 }
 
 func extractJSON(raw string) string {

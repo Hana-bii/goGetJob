@@ -1,6 +1,7 @@
 package ai_test
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -11,6 +12,18 @@ import (
 
 func TestPromptLoaderLoadsCopiedPrompt(t *testing.T) {
 	loader := ai.NewPromptLoader("../../../internal/prompts")
+
+	got, err := loader.Load("knowledgebase-query-user.st")
+
+	require.NoError(t, err)
+	require.Contains(t, got, "{context}")
+	require.Contains(t, got, "{question}")
+}
+
+func TestPromptLoaderRelativeRootSurvivesWorkingDirectoryChange(t *testing.T) {
+	root := filepath.Join("..", "..", "..", "internal", "prompts")
+	loader := ai.NewPromptLoader(root)
+	t.Chdir(t.TempDir())
 
 	got, err := loader.Load("knowledgebase-query-user.st")
 

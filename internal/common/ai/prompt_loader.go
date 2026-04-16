@@ -17,6 +17,9 @@ func NewPromptLoader(root string) *PromptLoader {
 	if root == "" {
 		root = "internal/prompts"
 	}
+	if absRoot, err := filepath.Abs(root); err == nil {
+		root = absRoot
+	}
 	return &PromptLoader{root: root}
 }
 

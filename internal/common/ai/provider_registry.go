@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -101,15 +102,18 @@ func (m *OpenAICompatibleChatModel) Generate(ctx context.Context, messages []Cha
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		snippet := strings.TrimSpace(string(body))
+		if snippet != "" {
+			return "", fmt.Errorf("chat provider returned %d: %s", resp.StatusCode, snippet)
+		}
+		return "", fmt.Errorf("chat provider returned %d", resp.StatusCode)
+	}
+
 	var decoded chatCompletionResponse
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
 		return "", fmt.Errorf("decode chat response: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if decoded.Error.Message != "" {
-			return "", fmt.Errorf("chat provider returned %d: %s", resp.StatusCode, decoded.Error.Message)
-		}
-		return "", fmt.Errorf("chat provider returned %d", resp.StatusCode)
 	}
 	if len(decoded.Choices) == 0 {
 		return "", fmt.Errorf("chat provider returned no choices")

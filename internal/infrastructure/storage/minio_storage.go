@@ -22,8 +22,40 @@ type MinIOOptions struct {
 }
 
 type MinIOStorage struct {
-	client *minio.Client
+	client minioObjectClient
 	bucket string
+}
+
+type minioObjectClient interface {
+	PutObject(ctx context.Context, bucket, key string, reader io.Reader, size int64, opts minio.PutObjectOptions) (minio.UploadInfo, error)
+	StatObject(ctx context.Context, bucket, key string, opts minio.StatObjectOptions) (minio.ObjectInfo, error)
+	GetObject(ctx context.Context, bucket, key string, opts minio.GetObjectOptions) (io.ReadCloser, error)
+	RemoveObject(ctx context.Context, bucket, key string, opts minio.RemoveObjectOptions) error
+	PresignedGetObject(ctx context.Context, bucket, key string, expires time.Duration, reqParams url.Values) (*url.URL, error)
+}
+
+type minioClientAdapter struct {
+	client *minio.Client
+}
+
+func (a minioClientAdapter) PutObject(ctx context.Context, bucket, key string, reader io.Reader, size int64, opts minio.PutObjectOptions) (minio.UploadInfo, error) {
+	return a.client.PutObject(ctx, bucket, key, reader, size, opts)
+}
+
+func (a minioClientAdapter) StatObject(ctx context.Context, bucket, key string, opts minio.StatObjectOptions) (minio.ObjectInfo, error) {
+	return a.client.StatObject(ctx, bucket, key, opts)
+}
+
+func (a minioClientAdapter) GetObject(ctx context.Context, bucket, key string, opts minio.GetObjectOptions) (io.ReadCloser, error) {
+	return a.client.GetObject(ctx, bucket, key, opts)
+}
+
+func (a minioClientAdapter) RemoveObject(ctx context.Context, bucket, key string, opts minio.RemoveObjectOptions) error {
+	return a.client.RemoveObject(ctx, bucket, key, opts)
+}
+
+func (a minioClientAdapter) PresignedGetObject(ctx context.Context, bucket, key string, expires time.Duration, reqParams url.Values) (*url.URL, error) {
+	return a.client.PresignedGetObject(ctx, bucket, key, expires, reqParams)
 }
 
 func NewMinIOStorage(opts MinIOOptions) (*MinIOStorage, error) {
@@ -45,12 +77,19 @@ func NewMinIOStorage(opts MinIOOptions) (*MinIOStorage, error) {
 	}
 
 	return &MinIOStorage{
-		client: client,
+		client: minioClientAdapter{client: client},
 		bucket: opts.Bucket,
 	}, nil
 }
 
 func NewMinIOStorageWithClient(client *minio.Client, bucket string) *MinIOStorage {
+	if client == nil {
+		return &MinIOStorage{bucket: bucket}
+	}
+	return newMinIOStorageWithObjectClient(minioClientAdapter{client: client}, bucket)
+}
+
+func newMinIOStorageWithObjectClient(client minioObjectClient, bucket string) *MinIOStorage {
 	return &MinIOStorage{client: client, bucket: bucket}
 }
 
@@ -79,6 +118,9 @@ func (s *MinIOStorage) PutObject(ctx context.Context, input PutObjectInput) (Obj
 func (s *MinIOStorage) GetObject(ctx context.Context, key string) (io.ReadCloser, error) {
 	if s.client == nil {
 		return nil, fmt.Errorf("MinIO client is required")
+	}
+	if _, err := s.client.StatObject(ctx, s.bucket, key, minio.StatObjectOptions{}); err != nil {
+		return nil, fmt.Errorf("stat object %q: %w", key, err)
 	}
 	object, err := s.client.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
 	if err != nil {
