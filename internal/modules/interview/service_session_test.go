@@ -21,9 +21,13 @@ func (g staticQuestionGenerator) Generate(context.Context, GenerateQuestionsInpu
 
 type recordingProducer struct {
 	tasks []EvaluateTask
+	err   error
 }
 
 func (p *recordingProducer) SendEvaluateTask(_ context.Context, task EvaluateTask) error {
+	if p.err != nil {
+		return p.err
+	}
 	p.tasks = append(p.tasks, task)
 	return nil
 }
@@ -95,6 +99,43 @@ func TestSessionServiceSaveSubmitCompleteAndEnqueueEvaluation(t *testing.T) {
 	require.Equal(t, commonmodel.AsyncTaskStatusPending, detail.EvaluateStatus)
 }
 
+func TestCompletedSessionRejectsAnswerMutationsAndDoesNotReenqueue(t *testing.T) {
+	repo := NewMemoryRepository()
+	producer := &recordingProducer{}
+	service := NewSessionService(SessionServiceOptions{
+		Repository: repo,
+		QuestionGenerator: staticQuestionGenerator{questions: []Question{
+			NewQuestion(0, "q1", "JAVA", "Java", "", false, nil),
+		}},
+		EvaluateProducer: producer,
+	})
+	session, err := service.Create(context.Background(), CreateSessionRequest{QuestionCount: 1, SkillID: "java-backend"})
+	require.NoError(t, err)
+
+	_, err = service.SubmitAnswer(context.Background(), SubmitAnswerRequest{
+		SessionID:     session.SessionID,
+		QuestionIndex: 0,
+		Answer:        "final",
+	})
+	require.NoError(t, err)
+	require.Len(t, producer.tasks, 1)
+
+	_, err = service.SubmitAnswer(context.Background(), SubmitAnswerRequest{
+		SessionID:     session.SessionID,
+		QuestionIndex: 0,
+		Answer:        "retry",
+	})
+	require.Error(t, err)
+	require.Len(t, producer.tasks, 1)
+
+	err = service.SaveAnswer(context.Background(), SubmitAnswerRequest{
+		SessionID:     session.SessionID,
+		QuestionIndex: 0,
+		Answer:        "mutate",
+	})
+	require.Error(t, err)
+}
+
 func TestCreateReturnsUnfinishedSessionUnlessForceCreate(t *testing.T) {
 	repo := NewMemoryRepository()
 	service := NewSessionService(SessionServiceOptions{
@@ -127,6 +168,113 @@ func TestCreateReturnsUnfinishedSessionUnlessForceCreate(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotEqual(t, first.SessionID, forced.SessionID)
+}
+
+func TestCreateDoesNotReuseUnfinishedSessionForDifferentSkill(t *testing.T) {
+	repo := NewMemoryRepository()
+	service := NewSessionService(SessionServiceOptions{
+		Repository: repo,
+		QuestionGenerator: staticQuestionGenerator{questions: []Question{
+			NewQuestion(0, "q", "JAVA", "Java", "", false, nil),
+		}},
+	})
+
+	first, err := service.Create(context.Background(), CreateSessionRequest{
+		ResumeID:      uintPtr(21),
+		QuestionCount: 1,
+		SkillID:       "java-backend",
+	})
+	require.NoError(t, err)
+	second, err := service.Create(context.Background(), CreateSessionRequest{
+		ResumeID:      uintPtr(21),
+		QuestionCount: 1,
+		SkillID:       "python-backend",
+	})
+	require.NoError(t, err)
+
+	require.NotEqual(t, first.SessionID, second.SessionID)
+}
+
+func TestSessionListCurrentQuestionReportAndDelete(t *testing.T) {
+	repo := NewMemoryRepository()
+	producer := &recordingProducer{}
+	service := NewSessionService(SessionServiceOptions{
+		Repository: repo,
+		QuestionGenerator: staticQuestionGenerator{questions: []Question{
+			NewQuestion(0, "q1", "JAVA", "Java", "", false, nil),
+			NewQuestion(1, "q2", "MYSQL", "MySQL", "", false, nil),
+		}},
+		EvaluateProducer: producer,
+	})
+
+	session, err := service.Create(context.Background(), CreateSessionRequest{QuestionCount: 2, SkillID: "java-backend"})
+	require.NoError(t, err)
+	items, err := service.List(context.Background())
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+
+	current, err := service.CurrentQuestion(context.Background(), session.SessionID)
+	require.NoError(t, err)
+	require.Equal(t, false, current["completed"])
+	got, err := service.Get(context.Background(), session.SessionID)
+	require.NoError(t, err)
+	require.Equal(t, SessionStatusInProgress, got.Status)
+
+	err = service.Complete(context.Background(), session.SessionID)
+	require.NoError(t, err)
+	require.Len(t, producer.tasks, 1)
+
+	report, err := service.GenerateReport(context.Background(), staticEvaluator{report: evaluation.Report{
+		SessionID:       session.SessionID,
+		TotalQuestions:  2,
+		OverallScore:    76,
+		OverallFeedback: "solid",
+		QuestionDetails: []evaluation.QuestionEvaluation{
+			{QuestionIndex: 0, Question: "q1", Category: "Java", Score: 80},
+			{QuestionIndex: 1, Question: "q2", Category: "MySQL", Score: 72},
+		},
+	}}, session.SessionID, "refs")
+	require.NoError(t, err)
+	require.Equal(t, 76, report.OverallScore)
+
+	err = service.Delete(context.Background(), session.SessionID)
+	require.NoError(t, err)
+	_, err = service.Get(context.Background(), session.SessionID)
+	require.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestFailedEvaluationEnqueueMarksFailedAndCompleteCanRetry(t *testing.T) {
+	repo := NewMemoryRepository()
+	producer := &recordingProducer{err: assertAnError}
+	service := NewSessionService(SessionServiceOptions{
+		Repository: repo,
+		QuestionGenerator: staticQuestionGenerator{questions: []Question{
+			NewQuestion(0, "q", "JAVA", "Java", "", false, nil),
+		}},
+		EvaluateProducer: producer,
+	})
+	session, err := service.Create(context.Background(), CreateSessionRequest{QuestionCount: 1, SkillID: "java-backend"})
+	require.NoError(t, err)
+
+	_, err = service.SubmitAnswer(context.Background(), SubmitAnswerRequest{
+		SessionID:     session.SessionID,
+		QuestionIndex: 0,
+		Answer:        "answer",
+	})
+	require.ErrorIs(t, err, assertAnError)
+	got, err := service.Get(context.Background(), session.SessionID)
+	require.NoError(t, err)
+	require.Equal(t, SessionStatusCompleted, got.Status)
+	require.Equal(t, commonmodel.AsyncTaskStatusFailed, got.EvaluateStatus)
+	require.Contains(t, got.EvaluateError, "enqueue failed")
+
+	producer.err = nil
+	err = service.Complete(context.Background(), session.SessionID)
+	require.NoError(t, err)
+	require.Len(t, producer.tasks, 1)
+	got, err = service.Get(context.Background(), session.SessionID)
+	require.NoError(t, err)
+	require.Equal(t, commonmodel.AsyncTaskStatusPending, got.EvaluateStatus)
 }
 
 func TestEvaluationTaskHandlerPersistsReportAndHistoryExportIncludesAnswers(t *testing.T) {
@@ -182,4 +330,12 @@ func TestEvaluationTaskHandlerPersistsReportAndHistoryExportIncludesAnswers(t *t
 
 func uintPtr(value uint) *uint {
 	return &value
+}
+
+var assertAnError = errString("enqueue failed")
+
+type errString string
+
+func (e errString) Error() string {
+	return string(e)
 }

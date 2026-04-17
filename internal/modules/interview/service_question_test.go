@@ -114,6 +114,25 @@ func TestGenerateQuestionsFallsBackToSkillCategoriesWhenDirectionModelFails(t *t
 	require.NotEmpty(t, questions[0].Question)
 }
 
+func TestGenerateQuestionsWithCustomSkillIncludesJDInPrompt(t *testing.T) {
+	model := &promptAwareModel{}
+	service := newTestQuestionService(t, model, 1)
+
+	questions, err := service.Generate(context.Background(), GenerateQuestionsInput{
+		SkillID:       skill.CustomSkillID,
+		QuestionCount: 1,
+		CustomCategories: []skill.Category{
+			{Key: "JAVA", Label: "Custom Java", Priority: skill.PriorityCore},
+		},
+		JDText: "JD requires Redis Stream reliability",
+	})
+
+	require.NoError(t, err)
+	require.NotEmpty(t, questions)
+	require.Contains(t, model.joinedPrompts(), "JD requires Redis Stream reliability")
+	require.Contains(t, model.joinedPrompts(), "Custom Java")
+}
+
 func newTestQuestionService(t *testing.T, model ai.ChatModel, followUps int) *QuestionService {
 	t.Helper()
 	skillService, err := skill.NewService(skill.Options{Root: "../../../internal/skills"})

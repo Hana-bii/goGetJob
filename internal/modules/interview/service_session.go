@@ -52,7 +52,7 @@ func (s *SessionService) Create(ctx context.Context, request CreateSessionReques
 		count = DefaultQuestionCount
 	}
 	if request.ResumeID != nil && !request.ForceCreate {
-		if existing, err := s.repo.FindUnfinishedSession(ctx, *request.ResumeID, ""); err == nil {
+		if existing, err := s.repo.FindUnfinishedSession(ctx, *request.ResumeID, skillID); err == nil {
 			return s.sessionDTO(existing)
 		} else if err != nil && !errors.Is(err, ErrNotFound) {
 			return SessionDTO{}, err
@@ -150,6 +150,9 @@ func (s *SessionService) SaveAnswer(ctx context.Context, request SubmitAnswerReq
 	if err != nil {
 		return err
 	}
+	if answersLocked(session) {
+		return fmt.Errorf("interview already completed")
+	}
 	if request.QuestionIndex < 0 || request.QuestionIndex >= len(questions) {
 		return fmt.Errorf("invalid question index")
 	}
@@ -165,6 +168,9 @@ func (s *SessionService) SubmitAnswer(ctx context.Context, request SubmitAnswerR
 	session, questions, err := s.sessionWithQuestions(ctx, request.SessionID)
 	if err != nil {
 		return SubmitAnswerResponse{}, err
+	}
+	if answersLocked(session) {
+		return SubmitAnswerResponse{}, fmt.Errorf("interview already completed")
 	}
 	if request.QuestionIndex < 0 || request.QuestionIndex >= len(questions) {
 		return SubmitAnswerResponse{}, fmt.Errorf("invalid question index")
@@ -185,7 +191,8 @@ func (s *SessionService) SubmitAnswer(ctx context.Context, request SubmitAnswerR
 		return SubmitAnswerResponse{}, err
 	}
 	if !hasNext {
-		if err := s.enqueueEvaluate(ctx, session.SessionID); err != nil {
+		if err := s.sendEvaluateTask(ctx, session.SessionID); err != nil {
+			_ = s.markEvaluateFailed(ctx, session.SessionID, err)
 			return SubmitAnswerResponse{}, err
 		}
 	}
@@ -202,8 +209,22 @@ func (s *SessionService) Complete(ctx context.Context, sessionID string) error {
 	if err != nil {
 		return err
 	}
-	if session.Status == SessionStatusCompleted || session.Status == SessionStatusEvaluated {
+	if session.Status == SessionStatusEvaluated {
 		return fmt.Errorf("interview already completed")
+	}
+	if session.Status == SessionStatusCompleted {
+		if session.EvaluateStatus == commonmodel.AsyncTaskStatusFailed {
+			session.EvaluateStatus = commonmodel.AsyncTaskStatusPending
+			session.EvaluateError = ""
+			if err := s.repo.UpdateSession(ctx, session); err != nil {
+				return err
+			}
+			if err := s.sendEvaluateTask(ctx, sessionID); err != nil {
+				_ = s.markEvaluateFailed(ctx, sessionID, err)
+				return err
+			}
+		}
+		return nil
 	}
 	session.MarkCompleted(SessionStatusCompleted)
 	session.EvaluateStatus = commonmodel.AsyncTaskStatusPending
@@ -211,7 +232,11 @@ func (s *SessionService) Complete(ctx context.Context, sessionID string) error {
 	if err := s.repo.UpdateSession(ctx, session); err != nil {
 		return err
 	}
-	return s.enqueueEvaluate(ctx, sessionID)
+	if err := s.sendEvaluateTask(ctx, sessionID); err != nil {
+		_ = s.markEvaluateFailed(ctx, sessionID, err)
+		return err
+	}
+	return nil
 }
 
 func (s *SessionService) Delete(ctx context.Context, sessionID string) error {
@@ -283,11 +308,25 @@ func (s *SessionService) persistAnswerAndQuestions(ctx context.Context, session 
 	})
 }
 
-func (s *SessionService) enqueueEvaluate(ctx context.Context, sessionID string) error {
+func (s *SessionService) sendEvaluateTask(ctx context.Context, sessionID string) error {
 	if s.evaluateProducer == nil {
 		return nil
 	}
 	return s.evaluateProducer.SendEvaluateTask(ctx, EvaluateTask{SessionID: sessionID})
+}
+
+func (s *SessionService) markEvaluateFailed(ctx context.Context, sessionID string, cause error) error {
+	session, err := s.repo.FindSessionByID(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	session.EvaluateStatus = commonmodel.AsyncTaskStatusFailed
+	session.EvaluateError = truncateError(errorString(cause))
+	return s.repo.UpdateSession(ctx, session)
+}
+
+func answersLocked(session *Session) bool {
+	return session.Status == SessionStatusCompleted || session.Status == SessionStatusEvaluated
 }
 
 func parseQuestions(encoded string) ([]Question, error) {
