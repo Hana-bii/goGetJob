@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -67,7 +68,9 @@ func TestAnalyzeTaskHandlerSkipsExistingAnalysisOnRedelivery(t *testing.T) {
 	repo := NewMemoryRepository()
 	resume := &Resume{OriginalFilename: "resume.txt", FileHash: "hash", AnalyzeStatus: commonmodel.AsyncTaskStatusProcessing}
 	require.NoError(t, repo.CreateResume(context.Background(), resume))
-	require.NoError(t, repo.CreateAnalysis(context.Background(), analysisToEntity(resume.ID, AnalysisResult{OverallScore: 77})))
+	oldAnalysis := analysisToEntity(resume.ID, AnalysisResult{OverallScore: 77})
+	oldAnalysis.AnalyzedAt = time.Now().Add(-time.Minute)
+	require.NoError(t, repo.CreateAnalysis(context.Background(), oldAnalysis))
 	analyzer := &countingAnalyzer{result: AnalysisResult{OverallScore: 90}}
 	handler := NewAnalyzeTaskHandler(repo, analyzer)
 
@@ -84,17 +87,22 @@ func TestAnalyzeTaskHandlerForceCreatesNewAnalysisForReanalyze(t *testing.T) {
 	repo := NewMemoryRepository()
 	resume := &Resume{OriginalFilename: "resume.txt", FileHash: "hash", AnalyzeStatus: commonmodel.AsyncTaskStatusProcessing}
 	require.NoError(t, repo.CreateResume(context.Background(), resume))
-	require.NoError(t, repo.CreateAnalysis(context.Background(), analysisToEntity(resume.ID, AnalysisResult{OverallScore: 77})))
+	oldAnalysis := analysisToEntity(resume.ID, AnalysisResult{OverallScore: 77})
+	oldAnalysis.AnalyzedAt = time.Now().Add(-time.Minute)
+	require.NoError(t, repo.CreateAnalysis(context.Background(), oldAnalysis))
 	analyzer := &countingAnalyzer{result: AnalysisResult{OverallScore: 91}}
 	handler := NewAnalyzeTaskHandler(repo, analyzer)
 
-	require.NoError(t, handler.ProcessBusiness(context.Background(), AnalyzeTask{ResumeID: resume.ID, Content: "resume text", Force: true}))
+	requestedAt := time.Now()
+	require.NoError(t, handler.ProcessBusiness(context.Background(), AnalyzeTask{ResumeID: resume.ID, Content: "resume text", Force: true, RequestedAt: requestedAt}))
 
 	require.Equal(t, 1, analyzer.calls)
 	analyses, err := repo.ListAnalyses(context.Background(), resume.ID)
 	require.NoError(t, err)
 	require.Len(t, analyses, 2)
 	require.Equal(t, 91, analyses[1].OverallScore)
+	require.NoError(t, handler.ProcessBusiness(context.Background(), AnalyzeTask{ResumeID: resume.ID, Content: "resume text", Force: true, RequestedAt: requestedAt}))
+	require.Equal(t, 1, analyzer.calls)
 }
 
 func TestAnalyzeTaskHandlerMarksFailedWithTruncatedError(t *testing.T) {

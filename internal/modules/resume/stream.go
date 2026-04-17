@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"goGetJob/internal/common/async"
 	commonmodel "goGetJob/internal/common/model"
@@ -16,9 +17,10 @@ const (
 )
 
 type AnalyzeTask struct {
-	ResumeID uint   `json:"resumeId"`
-	Content  string `json:"content"`
-	Force    bool   `json:"force,omitempty"`
+	ResumeID    uint      `json:"resumeId"`
+	Content     string    `json:"content"`
+	Force       bool      `json:"force,omitempty"`
+	RequestedAt time.Time `json:"requestedAt,omitempty"`
 }
 
 type AnalyzeProducer interface {
@@ -78,12 +80,12 @@ func (h *AnalyzeTaskHandler) ProcessBusiness(ctx context.Context, task AnalyzeTa
 	if err != nil {
 		return err
 	}
-	if !task.Force {
-		if latest, err := h.repo.LatestAnalysis(ctx, resume.ID); err == nil && latest != nil {
+	if latest, err := h.repo.LatestAnalysis(ctx, resume.ID); err == nil && latest != nil {
+		if !task.Force || (!task.RequestedAt.IsZero() && !latest.AnalyzedAt.Before(task.RequestedAt)) {
 			return nil
-		} else if err != nil && !errors.Is(err, ErrNotFound) {
-			return err
 		}
+	} else if err != nil && !errors.Is(err, ErrNotFound) {
+		return err
 	}
 	result, err := h.analyzer.Analyze(ctx, task.Content)
 	if err != nil {
