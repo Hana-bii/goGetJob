@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
@@ -241,7 +242,7 @@ func (s *Service) buildReferenceSection(skill Skill, allocation map[string]int, 
 		builder.WriteByte('\n')
 		builder.WriteString(content)
 		if builder.Len() > maxChars {
-			out := builder.String()[:maxChars]
+			out := truncateUTF8(builder.String(), maxChars)
 			return out + "\n...(references truncated)"
 		}
 	}
@@ -253,11 +254,20 @@ func (s *Service) buildReferenceSection(skill Skill, allocation map[string]int, 
 
 func (s *Service) loadReference(skillID string, category Category) string {
 	candidates := []string{}
+	effectiveSkillID := skillID
+	if skillID == CustomSkillID {
+		if mapped, ok := s.categoryRefIndex[category.Key]; ok {
+			effectiveSkillID = mapped.skillID
+		}
+	}
 	if category.Shared {
 		candidates = append(candidates, filepath.Join(s.root, "_shared", "references", category.Ref))
 	}
-	if skillID != "" && skillID != CustomSkillID {
-		candidates = append(candidates, filepath.Join(s.root, skillID, "references", category.Ref))
+	if effectiveSkillID != "" && effectiveSkillID != CustomSkillID {
+		candidates = append(candidates,
+			filepath.Join(s.root, effectiveSkillID, "references", category.Ref),
+			filepath.Join(s.root, effectiveSkillID, category.Ref),
+		)
 	}
 	if !category.Shared {
 		candidates = append(candidates, filepath.Join(s.root, "_shared", "references", category.Ref))
@@ -272,12 +282,28 @@ func (s *Service) loadReference(skillID string, category Category) string {
 		}
 		content := strings.TrimSpace(string(raw))
 		if len(content) > maxSingleReferenceChars {
-			content = content[:maxSingleReferenceChars] + "\n...(single reference truncated)"
+			content = truncateUTF8(content, maxSingleReferenceChars) + "\n...(single reference truncated)"
 		}
 		s.referenceCache[path] = content
 		return content
 	}
 	return ""
+}
+
+func truncateUTF8(value string, limit int) string {
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	end := limit
+	for end > 0 && !utf8.ValidString(value[:end]) {
+		_, size := utf8.DecodeLastRuneInString(value[:end])
+		if size <= 1 {
+			end--
+		} else {
+			end -= size
+		}
+	}
+	return strings.TrimSpace(value[:end])
 }
 
 func safeReference(ref string) bool {

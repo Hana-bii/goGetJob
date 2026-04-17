@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"goGetJob/internal/common/ai"
 )
@@ -160,14 +161,16 @@ func buildQARecords(batch []QaRecord) string {
 func mergeQuestionEvaluations(results []batchResult) []questionEvalDTO {
 	merged := []questionEvalDTO{}
 	for _, result := range results {
-		current := []questionEvalDTO{}
+		current := map[int]questionEvalDTO{}
 		if result.report != nil {
-			current = result.report.QuestionEvaluations
+			for _, item := range result.report.QuestionEvaluations {
+				current[item.QuestionIndex] = item
+			}
 		}
 		for i := result.start; i < result.end; i++ {
-			relative := i - result.start
-			if relative < len(current) {
-				merged = append(merged, current[relative])
+			if item, ok := current[i]; ok {
+				item.Score = clampScore(item.Score)
+				merged = append(merged, item)
 			} else {
 				merged = append(merged, questionEvalDTO{QuestionIndex: i, Score: 0, Feedback: "该题未成功生成评估结果，系统按 0 分处理。"})
 			}
@@ -227,6 +230,7 @@ func buildReport(sessionID string, qaRecords []QaRecord, evaluations []questionE
 		if strings.TrimSpace(record.UserAnswer) == "" {
 			score = 0
 		}
+		score = clampScore(score)
 		questionDetails = append(questionDetails, QuestionEvaluation{QuestionIndex: record.QuestionIndex, Question: record.Question, Category: record.Category, UserAnswer: record.UserAnswer, Score: score, Feedback: eval.Feedback})
 		referenceAnswers = append(referenceAnswers, ReferenceAnswer{QuestionIndex: record.QuestionIndex, Question: record.Question, ReferenceAnswer: eval.ReferenceAnswer, KeyPoints: eval.KeyPoints})
 		categoryScores[record.Category] = append(categoryScores[record.Category], score)
@@ -287,7 +291,16 @@ func truncate(value string, limit int) string {
 	if limit <= 0 || len(value) <= limit {
 		return value
 	}
-	return value[:limit]
+	end := limit
+	for end > 0 && !utf8.ValidString(value[:end]) {
+		_, size := utf8.DecodeLastRuneInString(value[:end])
+		if size <= 1 {
+			end--
+		} else {
+			end -= size
+		}
+	}
+	return value[:end]
 }
 
 func nonEmpty(value, fallback string) string {
@@ -295,4 +308,14 @@ func nonEmpty(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func clampScore(score int) int {
+	if score < 0 {
+		return 0
+	}
+	if score > 100 {
+		return 100
+	}
+	return score
 }

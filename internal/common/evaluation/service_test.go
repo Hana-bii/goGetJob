@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 
@@ -63,6 +64,29 @@ func TestEvaluateCategoryAveragesAndUnansweredZero(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 50, got.OverallScore)
 	require.Equal(t, 50, got.CategoryScores[0].Score)
+}
+
+func TestEvaluateMatchesQuestionIndexAndClampsScores(t *testing.T) {
+	model := &sequenceModel{responses: []string{
+		`{"overallScore":100,"overallFeedback":"ok","strengths":[],"improvements":[],"questionEvaluations":[{"questionIndex":1,"score":150,"feedback":"second","referenceAnswer":"ref1","keyPoints":[]},{"questionIndex":0,"score":-10,"feedback":"first","referenceAnswer":"ref0","keyPoints":[]}]}`,
+		`{"overallFeedback":"ok","strengths":[],"improvements":[]}`,
+	}}
+	service := NewService(Options{Model: model, PromptLoader: ai.NewPromptLoader("../../prompts"), BatchSize: 10})
+
+	got, err := service.Evaluate(context.Background(), "s4", []QaRecord{
+		{QuestionIndex: 0, Question: "Q1", Category: "Go", UserAnswer: "A1"},
+		{QuestionIndex: 1, Question: "Q2", Category: "Go", UserAnswer: "A2"},
+	}, "", "")
+
+	require.NoError(t, err)
+	require.Equal(t, 0, got.QuestionDetails[0].Score)
+	require.Equal(t, "first", got.QuestionDetails[0].Feedback)
+	require.Equal(t, 100, got.QuestionDetails[1].Score)
+	require.Equal(t, "second", got.QuestionDetails[1].Feedback)
+}
+
+func TestTruncatePreservesUTF8(t *testing.T) {
+	require.True(t, utf8.ValidString(truncate("你好世界", 5)))
 }
 
 type sequenceModel struct {

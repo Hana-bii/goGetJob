@@ -48,3 +48,13 @@ func TestBuildCustomSkillMapsKnownReferencesAndSafeSection(t *testing.T) {
 	require.NotContains(t, section, "secret")
 	require.NotEmpty(t, section)
 }
+
+func TestBuildReferenceSectionLoadsSkillLocalReference(t *testing.T) {
+	service, err := NewService(Options{Root: "../../../skills"})
+	require.NoError(t, err)
+
+	section := service.BuildReferenceSectionSafe("ai-agent-dev", map[string]int{"AGENT_BASIS": 1})
+
+	require.Contains(t, section, "Agent")
+	require.NotContains(t, section, "未配置")
+}
