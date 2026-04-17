@@ -156,7 +156,7 @@ func (s *Service) summarize(ctx context.Context, qaRecords []QaRecord, evaluatio
 func buildQARecords(batch []QaRecord) string {
 	var builder strings.Builder
 	for _, record := range batch {
-		builder.WriteString(fmt.Sprintf("问题%d [%s]: %s\n", record.QuestionIndex+1, record.Category, record.Question))
+		builder.WriteString(fmt.Sprintf("questionIndex=%d | 问题%d [%s]: %s\n", record.QuestionIndex, record.QuestionIndex+1, record.Category, record.Question))
 		if record.UserAnswer == "" {
 			builder.WriteString("回答: (未回答)\n\n")
 		} else {
@@ -323,7 +323,8 @@ func nonEmpty(value, fallback string) string {
 
 func batchFormatInstruction() string {
 	return `Return strict JSON with this shape:
-{"overallScore":0,"overallFeedback":"","strengths":[],"improvements":[],"questionEvaluations":[{"questionIndex":0,"score":0,"feedback":"","referenceAnswer":"","keyPoints":[]}]}`
+{"overallScore":0,"overallFeedback":"","strengths":[],"improvements":[],"questionEvaluations":[{"questionIndex":0,"score":0,"feedback":"","referenceAnswer":"","keyPoints":[]}]}
+The questionIndex value MUST be copied exactly from each input line's questionIndex field.`
 }
 
 func summaryFormatInstruction() string {

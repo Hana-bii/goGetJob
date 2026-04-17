@@ -33,6 +33,7 @@ func TestEvaluateSplitsBatchesMergesSummaryAndReferenceAnswers(t *testing.T) {
 	require.Len(t, model.prompts, 3)
 	require.Contains(t, model.prompts[0], "reference baseline")
 	require.Contains(t, model.prompts[0], "Return strict JSON")
+	require.Contains(t, model.prompts[0], "questionIndex=0")
 }
 
 func TestEvaluateUsesZeroScoreFallbackAndSummaryFallback(t *testing.T) {
