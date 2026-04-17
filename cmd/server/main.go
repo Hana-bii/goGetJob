@@ -13,11 +13,14 @@ import (
 	"goGetJob/internal/app"
 	"goGetJob/internal/common/ai"
 	"goGetJob/internal/common/config"
+	"goGetJob/internal/common/evaluation"
 	"goGetJob/internal/common/logger"
 	"goGetJob/internal/infrastructure/db"
 	"goGetJob/internal/infrastructure/export"
 	redisinfra "goGetJob/internal/infrastructure/redis"
 	"goGetJob/internal/infrastructure/storage"
+	"goGetJob/internal/modules/interview"
+	interviewskill "goGetJob/internal/modules/interview/skill"
 	"goGetJob/internal/modules/resume"
 )
 
@@ -40,8 +43,14 @@ func main() {
 		os.Exit(1)
 	}
 	defer cleanup()
+	interviewOption, interviewCleanup, err := buildInterviewModule(cfg, log)
+	if err != nil {
+		log.Error("initialize interview module", "error", err)
+		os.Exit(1)
+	}
+	defer interviewCleanup()
 
-	engine := app.New(cfg, log, resumeOption)
+	engine := app.New(cfg, log, resumeOption, interviewOption)
 
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	log.Info("starting server", "addr", addr, "config_path", configPath)
@@ -50,6 +59,75 @@ func main() {
 		log.Error("server stopped", "error", err)
 		os.Exit(1)
 	}
+}
+
+func buildInterviewModule(cfg *config.Config, log *slog.Logger) (app.Option, func(), error) {
+	ctx := context.Background()
+	var cleanup []func()
+
+	var repo interview.Repository
+	if cfg.Database.DSN != "" {
+		database, err := db.Open(db.Options{DSN: cfg.Database.DSN})
+		if err != nil {
+			return nil, nil, err
+		}
+		sqlDB, err := database.DB()
+		if err == nil {
+			cleanup = append(cleanup, func() { _ = sqlDB.Close() })
+		}
+		gormRepo := interview.NewGormRepository(database)
+		if err := gormRepo.AutoMigrate(); err != nil {
+			return nil, nil, err
+		}
+		repo = gormRepo
+	} else {
+		log.Warn("DATABASE_DSN is empty; interview module uses in-memory repository")
+		repo = interview.NewMemoryRepository()
+	}
+
+	redisClient := redisinfra.New(redisinfra.Options{
+		Addr: cfg.Redis.Addr,
+		DB:   cfg.Redis.DB,
+	})
+	cleanup = append(cleanup, func() { _ = redisClient.Close() })
+
+	model, err := ai.NewProviderRegistry(cfg.AI).Default()
+	if err != nil {
+		return nil, nil, err
+	}
+	skillService, err := interviewskill.NewService(interviewskill.Options{Root: "internal/skills"})
+	if err != nil {
+		return nil, nil, err
+	}
+	questionService := interview.NewQuestionService(interview.QuestionServiceOptions{
+		Model:        model,
+		ResumeModel:  model,
+		SkillService: skillService,
+		PromptLoader: ai.NewPromptLoader("internal/prompts"),
+	})
+	evaluator := interview.NewEvaluationService(evaluation.NewService(evaluation.Options{
+		Model:        model,
+		PromptLoader: ai.NewPromptLoader("internal/prompts"),
+	}), skillService)
+	producer := interview.NewStreamEvaluateProducer(redisClient)
+	sessionService := interview.NewSessionService(interview.SessionServiceOptions{
+		Repository:        repo,
+		QuestionGenerator: questionService,
+		EvaluateProducer:  producer,
+	})
+	historyService := interview.NewHistoryService(repo, export.NewPDFExporter(export.PDFOptions{}))
+	handler := interview.NewHandler(sessionService, historyService, evaluator, evaluator)
+
+	consumer := interview.NewEvaluateConsumer(redisClient, repo, evaluator, evaluator, "")
+	go runConsumer(ctx, log, "interview evaluate consumer", consumer)
+
+	return app.WithRoutes(func(engine *gin.Engine) {
+			interview.RegisterRoutes(engine, handler, redisClient)
+		}), func() {
+			for i := len(cleanup) - 1; i >= 0; i-- {
+				cleanup[i]()
+			}
+		}, nil
 }
 
 func buildResumeModule(cfg *config.Config, log *slog.Logger) (app.Option, func(), error) {
@@ -127,13 +205,17 @@ type resumeConsumer interface {
 }
 
 func runResumeConsumer(ctx context.Context, log *slog.Logger, consumer resumeConsumer) {
+	runConsumer(ctx, log, "resume analyze consumer", consumer)
+}
+
+func runConsumer(ctx context.Context, log *slog.Logger, name string, consumer resumeConsumer) {
 	backoff := time.Second
 	for {
 		if err := consumer.Run(ctx); err != nil {
 			if ctx.Err() != nil {
 				return
 			}
-			log.Error("resume analyze consumer stopped; restarting", "error", err, "backoff", backoff)
+			log.Error(name+" stopped; restarting", "error", err, "backoff", backoff)
 			select {
 			case <-ctx.Done():
 				return
