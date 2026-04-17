@@ -12,7 +12,17 @@ import (
 	"goGetJob/internal/common/response"
 )
 
-func New(cfg *config.Config, log *slog.Logger) *gin.Engine {
+type Option func(*gin.Engine)
+
+func WithRoutes(register func(*gin.Engine)) Option {
+	return func(engine *gin.Engine) {
+		if register != nil {
+			register(engine)
+		}
+	}
+}
+
+func New(cfg *config.Config, log *slog.Logger, options ...Option) *gin.Engine {
 	if cfg == nil {
 		defaultCfg := config.Default()
 		cfg = &defaultCfg
@@ -37,6 +47,11 @@ func New(cfg *config.Config, log *slog.Logger) *gin.Engine {
 			"status": "ok",
 		}))
 	})
+	for _, option := range options {
+		if option != nil {
+			option(engine)
+		}
+	}
 
 	return engine
 }
