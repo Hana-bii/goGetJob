@@ -103,6 +103,9 @@ func TestDuplicateFailedResumeReenqueuesAnalyzeTask(t *testing.T) {
 	require.Empty(t, got.Resume.AnalyzeError)
 	require.Len(t, svc.producer.tasks, 1)
 	require.Equal(t, got.Resume.ID, svc.producer.tasks[0].ResumeID)
+	stored, err := svc.repo.FindResumeByID(ctx, got.Resume.ID)
+	require.NoError(t, err)
+	require.Equal(t, commonmodel.AsyncTaskStatusPending, stored.AnalyzeStatus)
 }
 
 func TestHistoryDeleteRemovesStoredObject(t *testing.T) {

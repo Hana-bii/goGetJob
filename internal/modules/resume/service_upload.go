@@ -79,6 +79,9 @@ func (s *UploadService) UploadBytes(ctx context.Context, input UploadInput) (Upl
 		if analysis == nil && existing.AnalyzeStatus == commonmodel.AsyncTaskStatusFailed {
 			existing.AnalyzeStatus = commonmodel.AsyncTaskStatusPending
 			existing.AnalyzeError = ""
+			if updateErr := s.repo.UpdateResume(ctx, existing); updateErr != nil {
+				return UploadResult{}, updateErr
+			}
 			if err := s.producer.SendAnalyzeTask(ctx, AnalyzeTask{ResumeID: existing.ID, Content: existing.ResumeText}); err != nil {
 				existing.AnalyzeStatus = commonmodel.AsyncTaskStatusFailed
 				existing.AnalyzeError = truncateError("enqueue analyze task: " + err.Error())
@@ -163,7 +166,7 @@ func (s *UploadService) Reanalyze(ctx context.Context, id uint) error {
 	if err := s.repo.UpdateResume(ctx, resume); err != nil {
 		return err
 	}
-	if err := s.producer.SendAnalyzeTask(ctx, AnalyzeTask{ResumeID: resume.ID, Content: resume.ResumeText}); err != nil {
+	if err := s.producer.SendAnalyzeTask(ctx, AnalyzeTask{ResumeID: resume.ID, Content: resume.ResumeText, Force: true}); err != nil {
 		resume.AnalyzeStatus = commonmodel.AsyncTaskStatusFailed
 		resume.AnalyzeError = truncateError("enqueue analyze task: " + err.Error())
 		_ = s.repo.UpdateResume(ctx, resume)

@@ -18,6 +18,7 @@ const (
 type AnalyzeTask struct {
 	ResumeID uint   `json:"resumeId"`
 	Content  string `json:"content"`
+	Force    bool   `json:"force,omitempty"`
 }
 
 type AnalyzeProducer interface {
@@ -77,10 +78,12 @@ func (h *AnalyzeTaskHandler) ProcessBusiness(ctx context.Context, task AnalyzeTa
 	if err != nil {
 		return err
 	}
-	if latest, err := h.repo.LatestAnalysis(ctx, resume.ID); err == nil && latest != nil {
-		return nil
-	} else if err != nil && !errors.Is(err, ErrNotFound) {
-		return err
+	if !task.Force {
+		if latest, err := h.repo.LatestAnalysis(ctx, resume.ID); err == nil && latest != nil {
+			return nil
+		} else if err != nil && !errors.Is(err, ErrNotFound) {
+			return err
+		}
 	}
 	result, err := h.analyzer.Analyze(ctx, task.Content)
 	if err != nil {
