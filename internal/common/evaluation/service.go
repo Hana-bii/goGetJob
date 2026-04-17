@@ -3,6 +3,7 @@ package evaluation
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -46,9 +47,8 @@ type summaryDTO struct {
 }
 
 type batchResult struct {
-	start  int
-	end    int
-	report *batchReportDTO
+	records []QaRecord
+	report  *batchReportDTO
 }
 
 func NewService(options Options) *Service {
@@ -89,7 +89,7 @@ func (s *Service) evaluateInBatches(ctx context.Context, qaRecords []QaRecord, r
 		if err != nil {
 			report = nil
 		}
-		results = append(results, batchResult{start: start, end: end, report: report})
+		results = append(results, batchResult{records: append([]QaRecord(nil), qaRecords[start:end]...), report: report})
 	}
 	return results
 }
@@ -108,7 +108,11 @@ func (s *Service) evaluateBatch(ctx context.Context, batch []QaRecord, resumeTex
 		return nil, err
 	}
 	var report batchReportDTO
-	err = ai.InvokeStructured(ctx, s.model, system+"\n\n"+user, &report, ai.StructuredOptions{MaxAttempts: 1})
+	err = ai.InvokeStructured(ctx, s.model, system+"\n\n"+batchFormatInstruction()+"\n\n"+user, &report, ai.StructuredOptions{
+		MaxAttempts:       2,
+		InjectLastError:   true,
+		RepairInstruction: "Return strict JSON only matching the requested evaluation schema.",
+	})
 	return &report, err
 }
 
@@ -130,7 +134,11 @@ func (s *Service) summarize(ctx context.Context, qaRecords []QaRecord, evaluatio
 		return summaryDTO{OverallFeedback: fallbackFeedback, Strengths: fallbackStrengths, Improvements: fallbackImprovements}
 	}
 	var summary summaryDTO
-	if err := ai.InvokeStructured(ctx, s.model, system+"\n\n"+user, &summary, ai.StructuredOptions{MaxAttempts: 1}); err != nil {
+	if err := ai.InvokeStructured(ctx, s.model, system+"\n\n"+summaryFormatInstruction()+"\n\n"+user, &summary, ai.StructuredOptions{
+		MaxAttempts:       2,
+		InjectLastError:   true,
+		RepairInstruction: "Return strict JSON only matching the requested summary schema.",
+	}); err != nil {
 		return summaryDTO{OverallFeedback: fallbackFeedback, Strengths: fallbackStrengths, Improvements: fallbackImprovements}
 	}
 	if strings.TrimSpace(summary.OverallFeedback) == "" {
@@ -167,12 +175,12 @@ func mergeQuestionEvaluations(results []batchResult) []questionEvalDTO {
 				current[item.QuestionIndex] = item
 			}
 		}
-		for i := result.start; i < result.end; i++ {
-			if item, ok := current[i]; ok {
+		for _, record := range result.records {
+			if item, ok := current[record.QuestionIndex]; ok {
 				item.Score = clampScore(item.Score)
 				merged = append(merged, item)
 			} else {
-				merged = append(merged, questionEvalDTO{QuestionIndex: i, Score: 0, Feedback: "该题未成功生成评估结果，系统按 0 分处理。"})
+				merged = append(merged, questionEvalDTO{QuestionIndex: record.QuestionIndex, Score: 0, Feedback: "该题未成功生成评估结果，系统按 0 分处理。"})
 			}
 		}
 	}
@@ -239,6 +247,9 @@ func buildReport(sessionID string, qaRecords []QaRecord, evaluations []questionE
 	for category, scores := range categoryScores {
 		reportCategories = append(reportCategories, CategoryScore{Category: category, Score: average(scores), QuestionCount: len(scores)})
 	}
+	sort.Slice(reportCategories, func(i, j int) bool {
+		return reportCategories[i].Category < reportCategories[j].Category
+	})
 	return Report{SessionID: sessionID, TotalQuestions: len(qaRecords), OverallScore: averageQuestionScores(questionDetails), CategoryScores: reportCategories, QuestionDetails: questionDetails, OverallFeedback: summary.OverallFeedback, Strengths: summary.Strengths, Improvements: summary.Improvements, ReferenceAnswers: referenceAnswers}
 }
 
@@ -308,6 +319,16 @@ func nonEmpty(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func batchFormatInstruction() string {
+	return `Return strict JSON with this shape:
+{"overallScore":0,"overallFeedback":"","strengths":[],"improvements":[],"questionEvaluations":[{"questionIndex":0,"score":0,"feedback":"","referenceAnswer":"","keyPoints":[]}]}`
+}
+
+func summaryFormatInstruction() string {
+	return `Return strict JSON with this shape:
+{"overallFeedback":"","strengths":[],"improvements":[]}`
 }
 
 func clampScore(score int) int {

@@ -32,6 +32,7 @@ func TestEvaluateSplitsBatchesMergesSummaryAndReferenceAnswers(t *testing.T) {
 	require.Equal(t, "ref1", got.ReferenceAnswers[1].ReferenceAnswer)
 	require.Len(t, model.prompts, 3)
 	require.Contains(t, model.prompts[0], "reference baseline")
+	require.Contains(t, model.prompts[0], "Return strict JSON")
 }
 
 func TestEvaluateUsesZeroScoreFallbackAndSummaryFallback(t *testing.T) {
@@ -83,6 +84,40 @@ func TestEvaluateMatchesQuestionIndexAndClampsScores(t *testing.T) {
 	require.Equal(t, "first", got.QuestionDetails[0].Feedback)
 	require.Equal(t, 100, got.QuestionDetails[1].Score)
 	require.Equal(t, "second", got.QuestionDetails[1].Feedback)
+}
+
+func TestEvaluateSupportsNonContiguousQuestionIndexesAndStableCategories(t *testing.T) {
+	model := &sequenceModel{responses: []string{
+		`{"overallScore":90,"overallFeedback":"ok","strengths":[],"improvements":[],"questionEvaluations":[{"questionIndex":9,"score":90,"feedback":"ninth","referenceAnswer":"ref9","keyPoints":[]},{"questionIndex":5,"score":70,"feedback":"fifth","referenceAnswer":"ref5","keyPoints":[]}]}`,
+		`{"overallFeedback":"ok","strengths":[],"improvements":[]}`,
+	}}
+	service := NewService(Options{Model: model, PromptLoader: ai.NewPromptLoader("../../prompts"), BatchSize: 10})
+
+	got, err := service.Evaluate(context.Background(), "s5", []QaRecord{
+		{QuestionIndex: 5, Question: "Q5", Category: "Zed", UserAnswer: "A5"},
+		{QuestionIndex: 9, Question: "Q9", Category: "Alpha", UserAnswer: "A9"},
+	}, "", "")
+
+	require.NoError(t, err)
+	require.Equal(t, "fifth", got.QuestionDetails[0].Feedback)
+	require.Equal(t, "ninth", got.QuestionDetails[1].Feedback)
+	require.Equal(t, "Alpha", got.CategoryScores[0].Category)
+	require.Equal(t, "Zed", got.CategoryScores[1].Category)
+}
+
+func TestEvaluateRepairsNonJSONBatchOutput(t *testing.T) {
+	model := &sequenceModel{responses: []string{
+		"plain prose",
+		`{"overallScore":80,"overallFeedback":"repaired","strengths":[],"improvements":[],"questionEvaluations":[{"questionIndex":0,"score":80,"feedback":"ok","referenceAnswer":"ref","keyPoints":[]}]}`,
+		`{"overallFeedback":"summary","strengths":[],"improvements":[]}`,
+	}}
+	service := NewService(Options{Model: model, PromptLoader: ai.NewPromptLoader("../../prompts"), BatchSize: 10})
+
+	got, err := service.Evaluate(context.Background(), "s6", []QaRecord{{QuestionIndex: 0, Question: "Q", Category: "Go", UserAnswer: "A"}}, "", "")
+
+	require.NoError(t, err)
+	require.Equal(t, 80, got.OverallScore)
+	require.GreaterOrEqual(t, len(model.prompts), 3)
 }
 
 func TestTruncatePreservesUTF8(t *testing.T) {
