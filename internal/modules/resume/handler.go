@@ -34,6 +34,7 @@ func RegisterRoutes(engine *gin.Engine, handler *Handler) {
 }
 
 func (h *Handler) Upload(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, h.upload.maxFileSize+1024*1024)
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, response.Error(http.StatusBadRequest, "file is required"))

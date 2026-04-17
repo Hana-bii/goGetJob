@@ -63,6 +63,23 @@ func TestAnalyzeTaskHandlerStatusTransitions(t *testing.T) {
 	require.Equal(t, 90, latest.OverallScore)
 }
 
+func TestAnalyzeTaskHandlerSkipsExistingAnalysisOnRedelivery(t *testing.T) {
+	repo := NewMemoryRepository()
+	resume := &Resume{OriginalFilename: "resume.txt", FileHash: "hash", AnalyzeStatus: commonmodel.AsyncTaskStatusProcessing}
+	require.NoError(t, repo.CreateResume(context.Background(), resume))
+	require.NoError(t, repo.CreateAnalysis(context.Background(), analysisToEntity(resume.ID, AnalysisResult{OverallScore: 77})))
+	analyzer := &countingAnalyzer{result: AnalysisResult{OverallScore: 90}}
+	handler := NewAnalyzeTaskHandler(repo, analyzer)
+
+	require.NoError(t, handler.ProcessBusiness(context.Background(), AnalyzeTask{ResumeID: resume.ID, Content: "resume text"}))
+
+	require.Equal(t, 0, analyzer.calls)
+	analyses, err := repo.ListAnalyses(context.Background(), resume.ID)
+	require.NoError(t, err)
+	require.Len(t, analyses, 1)
+	require.Equal(t, 77, analyses[0].OverallScore)
+}
+
 func TestAnalyzeTaskHandlerMarksFailedWithTruncatedError(t *testing.T) {
 	repo := NewMemoryRepository()
 	resume := &Resume{OriginalFilename: "resume.txt", FileHash: "hash", AnalyzeStatus: commonmodel.AsyncTaskStatusProcessing}
@@ -96,4 +113,14 @@ type fakeAnalyzer struct {
 
 func (a fakeAnalyzer) Analyze(context.Context, string) (AnalysisResult, error) {
 	return a.result, a.err
+}
+
+type countingAnalyzer struct {
+	result AnalysisResult
+	calls  int
+}
+
+func (a *countingAnalyzer) Analyze(context.Context, string) (AnalysisResult, error) {
+	a.calls++
+	return a.result, nil
 }

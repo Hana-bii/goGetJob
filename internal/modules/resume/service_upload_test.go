@@ -86,6 +86,39 @@ func TestUploadMarksFailedWhenStreamEnqueueFailsAndTruncatesError(t *testing.T) 
 	require.Len(t, stored.AnalyzeError, maxAnalyzeErrorLength)
 }
 
+func TestDuplicateFailedResumeReenqueuesAnalyzeTask(t *testing.T) {
+	svc := newUploadTestService(t)
+	ctx := context.Background()
+	input := UploadInput{Filename: "resume.txt", ContentType: "text/plain", Data: []byte("retry me")}
+	svc.producer.err = errors.New("redis down")
+	_, err := svc.UploadBytes(ctx, input)
+	require.Error(t, err)
+
+	svc.producer.err = nil
+	got, err := svc.UploadBytes(ctx, input)
+
+	require.NoError(t, err)
+	require.True(t, got.Duplicate)
+	require.Equal(t, commonmodel.AsyncTaskStatusPending, got.Resume.AnalyzeStatus)
+	require.Empty(t, got.Resume.AnalyzeError)
+	require.Len(t, svc.producer.tasks, 1)
+	require.Equal(t, got.Resume.ID, svc.producer.tasks[0].ResumeID)
+}
+
+func TestHistoryDeleteRemovesStoredObject(t *testing.T) {
+	svc := newUploadTestService(t)
+	got, err := svc.UploadBytes(context.Background(), UploadInput{
+		Filename:    "resume.txt",
+		ContentType: "text/plain",
+		Data:        []byte("delete me"),
+	})
+	require.NoError(t, err)
+	history := NewHistoryService(svc.repo, nil, svc.storage)
+
+	require.NoError(t, history.Delete(context.Background(), got.Resume.ID))
+	require.Equal(t, []string{got.Storage.FileKey}, svc.storage.deleted)
+}
+
 type uploadTestService struct {
 	*UploadService
 	repo     *MemoryRepository

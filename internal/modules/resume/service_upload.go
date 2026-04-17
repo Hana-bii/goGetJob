@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	commonmodel "goGetJob/internal/common/model"
 	"goGetJob/internal/infrastructure/file"
 	"goGetJob/internal/infrastructure/storage"
 )
@@ -71,12 +72,22 @@ func (s *UploadService) UploadBytes(ctx context.Context, input UploadInput) (Upl
 	hash := file.HashBytes(input.Data)
 	if existing, err := s.repo.FindResumeByHash(ctx, hash); err == nil {
 		existing.Touch()
-		if updateErr := s.repo.UpdateResume(ctx, existing); updateErr != nil {
-			return UploadResult{}, updateErr
-		}
 		analysis, err := latestAnalysisResult(ctx, s.repo, existing)
 		if err != nil {
 			return UploadResult{}, err
+		}
+		if analysis == nil && existing.AnalyzeStatus == commonmodel.AsyncTaskStatusFailed {
+			existing.AnalyzeStatus = commonmodel.AsyncTaskStatusPending
+			existing.AnalyzeError = ""
+			if err := s.producer.SendAnalyzeTask(ctx, AnalyzeTask{ResumeID: existing.ID, Content: existing.ResumeText}); err != nil {
+				existing.AnalyzeStatus = commonmodel.AsyncTaskStatusFailed
+				existing.AnalyzeError = truncateError("enqueue analyze task: " + err.Error())
+				_ = s.repo.UpdateResume(ctx, existing)
+				return UploadResult{}, fmt.Errorf("enqueue analyze task: %w", err)
+			}
+		}
+		if updateErr := s.repo.UpdateResume(ctx, existing); updateErr != nil {
+			return UploadResult{}, updateErr
 		}
 		return UploadResult{
 			Resume:    *existing,
@@ -123,7 +134,7 @@ func (s *UploadService) UploadBytes(ctx context.Context, input UploadInput) (Upl
 		return UploadResult{}, err
 	}
 	if err := s.producer.SendAnalyzeTask(ctx, AnalyzeTask{ResumeID: resume.ID, Content: resumeText}); err != nil {
-		resume.AnalyzeStatus = "FAILED"
+		resume.AnalyzeStatus = commonmodel.AsyncTaskStatusFailed
 		resume.AnalyzeError = truncateError("enqueue analyze task: " + err.Error())
 		_ = s.repo.UpdateResume(ctx, resume)
 		return UploadResult{}, fmt.Errorf("enqueue analyze task: %w", err)
@@ -147,13 +158,13 @@ func (s *UploadService) Reanalyze(ctx context.Context, id uint) error {
 	if strings.TrimSpace(resume.ResumeText) == "" {
 		return fmt.Errorf("resume text is empty")
 	}
-	resume.AnalyzeStatus = "PENDING"
+	resume.AnalyzeStatus = commonmodel.AsyncTaskStatusPending
 	resume.AnalyzeError = ""
 	if err := s.repo.UpdateResume(ctx, resume); err != nil {
 		return err
 	}
 	if err := s.producer.SendAnalyzeTask(ctx, AnalyzeTask{ResumeID: resume.ID, Content: resume.ResumeText}); err != nil {
-		resume.AnalyzeStatus = "FAILED"
+		resume.AnalyzeStatus = commonmodel.AsyncTaskStatusFailed
 		resume.AnalyzeError = truncateError("enqueue analyze task: " + err.Error())
 		_ = s.repo.UpdateResume(ctx, resume)
 		return fmt.Errorf("enqueue analyze task: %w", err)

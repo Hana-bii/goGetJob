@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -106,15 +107,11 @@ func buildResumeModule(cfg *config.Config, log *slog.Logger) (app.Option, func()
 		Storage:    objectStorage,
 		Producer:   producer,
 	})
-	historyService := resume.NewHistoryService(repo, export.NewPDFExporter(export.PDFOptions{}))
+	historyService := resume.NewHistoryService(repo, export.NewPDFExporter(export.PDFOptions{}), objectStorage)
 	handler := resume.NewHandler(uploadService, historyService)
 
 	consumer := resume.NewAnalyzeConsumer(redisClient, repo, analyzer, "")
-	go func() {
-		if err := consumer.Run(ctx); err != nil {
-			log.Error("resume analyze consumer stopped", "error", err)
-		}
-	}()
+	go runResumeConsumer(ctx, log, consumer)
 
 	return app.WithRoutes(func(engine *gin.Engine) {
 			resume.RegisterRoutes(engine, handler)
@@ -123,4 +120,30 @@ func buildResumeModule(cfg *config.Config, log *slog.Logger) (app.Option, func()
 				cleanup[i]()
 			}
 		}, nil
+}
+
+type resumeConsumer interface {
+	Run(context.Context) error
+}
+
+func runResumeConsumer(ctx context.Context, log *slog.Logger, consumer resumeConsumer) {
+	backoff := time.Second
+	for {
+		if err := consumer.Run(ctx); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Error("resume analyze consumer stopped; restarting", "error", err, "backoff", backoff)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			if backoff < 30*time.Second {
+				backoff *= 2
+			}
+			continue
+		}
+		return
+	}
 }

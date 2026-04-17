@@ -6,15 +6,21 @@ import (
 	"fmt"
 
 	"goGetJob/internal/infrastructure/export"
+	"goGetJob/internal/infrastructure/storage"
 )
 
 type HistoryService struct {
 	repo        Repository
 	pdfExporter export.PDFExporter
+	objectStore storage.Storage
 }
 
-func NewHistoryService(repo Repository, pdfExporter export.PDFExporter) *HistoryService {
-	return &HistoryService{repo: repo, pdfExporter: pdfExporter}
+func NewHistoryService(repo Repository, pdfExporter export.PDFExporter, objectStore ...storage.Storage) *HistoryService {
+	var store storage.Storage
+	if len(objectStore) > 0 {
+		store = objectStore[0]
+	}
+	return &HistoryService{repo: repo, pdfExporter: pdfExporter, objectStore: store}
 }
 
 func (s *HistoryService) List(ctx context.Context) ([]ResumeListItem, error) {
@@ -65,6 +71,15 @@ func (s *HistoryService) Detail(ctx context.Context, id uint) (ResumeDetail, err
 }
 
 func (s *HistoryService) Delete(ctx context.Context, id uint) error {
+	resume, err := s.repo.FindResumeByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	if s.objectStore != nil && resume.StorageKey != "" {
+		if err := s.objectStore.DeleteObject(ctx, resume.StorageKey); err != nil {
+			return fmt.Errorf("delete resume object: %w", err)
+		}
+	}
 	return s.repo.DeleteResume(ctx, id)
 }
 
