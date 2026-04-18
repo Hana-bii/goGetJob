@@ -112,7 +112,10 @@ func (s *MemoryStore) SimilaritySearch(_ context.Context, req SearchRequest) ([]
 }
 
 type PGVectorStore struct {
-	db *gorm.DB
+	db         *gorm.DB
+	migrateMu  sync.Mutex
+	migrated   bool
+	migrateErr error
 }
 
 func NewPGVectorStore(db *gorm.DB) *PGVectorStore {
@@ -123,23 +126,103 @@ func (s *PGVectorStore) DeleteByKnowledgeBaseID(ctx context.Context, kbID uint) 
 	if s == nil || s.db == nil {
 		return fmt.Errorf("gorm db is required")
 	}
-	return s.db.WithContext(ctx).
-		Exec("DELETE FROM vector_store WHERE metadata->>'kb_id' = ? OR metadata->>'kb_id_long' = ?", strconv.FormatUint(uint64(kbID), 10), strconv.FormatUint(uint64(kbID), 10)).
-		Error
+	if err := s.ensureTable(); err != nil {
+		return err
+	}
+	return s.db.WithContext(ctx).Where("knowledge_base_id = ?", kbID).Delete(&VectorRecord{}).Error
 }
 
-func (s *PGVectorStore) AddDocuments(context.Context, []Document) error {
+func (s *PGVectorStore) AddDocuments(ctx context.Context, docs []Document) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("gorm db is required")
 	}
-	return fmt.Errorf("pgvector add documents is not configured; use MemoryStore or implement vector table mapping")
+	if err := s.ensureTable(); err != nil {
+		return err
+	}
+	records := make([]VectorRecord, 0, len(docs))
+	for _, doc := range docs {
+		metadata, err := json.Marshal(doc.Metadata)
+		if err != nil {
+			return fmt.Errorf("marshal vector metadata: %w", err)
+		}
+		embedding, err := json.Marshal(doc.Embedding)
+		if err != nil {
+			return fmt.Errorf("marshal vector embedding: %w", err)
+		}
+		records = append(records, VectorRecord{
+			ID:              doc.ID,
+			KnowledgeBaseID: metadataKBID(doc.Metadata),
+			Content:         doc.Content,
+			Metadata:        string(metadata),
+			Embedding:       string(embedding),
+		})
+	}
+	if len(records) == 0 {
+		return nil
+	}
+	return s.db.WithContext(ctx).Save(&records).Error
 }
 
-func (s *PGVectorStore) SimilaritySearch(context.Context, SearchRequest) ([]Document, error) {
+func (s *PGVectorStore) SimilaritySearch(ctx context.Context, req SearchRequest) ([]Document, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("gorm db is required")
 	}
-	return nil, fmt.Errorf("pgvector similarity search is not configured; use MemoryStore or implement vector table mapping")
+	if err := s.ensureTable(); err != nil {
+		return nil, err
+	}
+	var records []VectorRecord
+	query := s.db.WithContext(ctx)
+	if len(req.KnowledgeBaseIDs) > 0 {
+		query = query.Where("knowledge_base_id IN ?", req.KnowledgeBaseIDs)
+	}
+	if err := query.Find(&records).Error; err != nil {
+		return nil, err
+	}
+	searchText := strings.ToLower(strings.TrimSpace(req.Query))
+	docs := make([]Document, 0, len(records))
+	for _, record := range records {
+		score := lexicalScore(searchText, strings.ToLower(record.Content))
+		if req.MinScore > 0 && score < req.MinScore {
+			continue
+		}
+		var metadata map[string]any
+		_ = json.Unmarshal([]byte(record.Metadata), &metadata)
+		var embedding []float32
+		_ = json.Unmarshal([]byte(record.Embedding), &embedding)
+		docs = append(docs, Document{
+			ID:        record.ID,
+			Content:   record.Content,
+			Metadata:  metadata,
+			Embedding: embedding,
+			Score:     score,
+		})
+	}
+	sort.SliceStable(docs, func(i, j int) bool {
+		return docs[i].Score > docs[j].Score
+	})
+	if req.TopK >= 0 && len(docs) > req.TopK {
+		docs = docs[:req.TopK]
+	}
+	return docs, nil
+}
+
+func (s *PGVectorStore) ensureTable() error {
+	s.migrateMu.Lock()
+	defer s.migrateMu.Unlock()
+	if s.migrated || s.migrateErr != nil {
+		return s.migrateErr
+	}
+	s.migrateErr = s.db.AutoMigrate(&VectorRecord{})
+	s.migrated = s.migrateErr == nil
+	return s.migrateErr
+}
+
+type VectorRecord struct {
+	ID              string `gorm:"primaryKey;size:128"`
+	KnowledgeBaseID uint   `gorm:"index;not null"`
+	Content         string `gorm:"type:text"`
+	Metadata        string `gorm:"type:text"`
+	Embedding       string `gorm:"type:text"`
 }
 
 type OpenAIEmbedder struct {

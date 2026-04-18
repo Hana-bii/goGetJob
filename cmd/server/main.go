@@ -75,6 +75,7 @@ func buildKnowledgeBaseModule(cfg *config.Config, log *slog.Logger) (app.Option,
 
 	var repo knowledgebase.Repository
 	var chatRepo knowledgebase.RagChatRepository
+	var vectorStore vector.Store
 	if cfg.Database.DSN != "" {
 		database, err := db.Open(db.Options{DSN: cfg.Database.DSN})
 		if err != nil {
@@ -90,11 +91,13 @@ func buildKnowledgeBaseModule(cfg *config.Config, log *slog.Logger) (app.Option,
 		}
 		repo = gormRepo
 		chatRepo = gormRepo
+		vectorStore = vector.NewPGVectorStore(database)
 	} else {
 		log.Warn("DATABASE_DSN is empty; knowledge base module uses in-memory repository")
 		memoryRepo := knowledgebase.NewMemoryRepository()
 		repo = memoryRepo
 		chatRepo = memoryRepo
+		vectorStore = vector.NewMemoryStore()
 	}
 
 	objectStorage, err := storage.NewMinIOStorage(storage.MinIOOptions{
@@ -119,7 +122,6 @@ func buildKnowledgeBaseModule(cfg *config.Config, log *slog.Logger) (app.Option,
 		return nil, nil, err
 	}
 	provider := cfg.AI.Providers[cfg.AI.DefaultProvider]
-	vectorStore := vector.NewMemoryStore()
 	vectorService := knowledgebase.NewVectorService(knowledgebase.VectorServiceOptions{
 		Store:    vectorStore,
 		Embedder: vector.NewOpenAIEmbedder(provider.BaseURL, provider.APIKey, provider.Model, nil),
