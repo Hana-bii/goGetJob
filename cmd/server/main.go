@@ -19,8 +19,10 @@ import (
 	"goGetJob/internal/infrastructure/export"
 	redisinfra "goGetJob/internal/infrastructure/redis"
 	"goGetJob/internal/infrastructure/storage"
+	"goGetJob/internal/infrastructure/vector"
 	"goGetJob/internal/modules/interview"
 	interviewskill "goGetJob/internal/modules/interview/skill"
+	"goGetJob/internal/modules/knowledgebase"
 	"goGetJob/internal/modules/resume"
 )
 
@@ -49,8 +51,14 @@ func main() {
 		os.Exit(1)
 	}
 	defer interviewCleanup()
+	knowledgeOption, knowledgeCleanup, err := buildKnowledgeBaseModule(cfg, log)
+	if err != nil {
+		log.Error("initialize knowledge base module", "error", err)
+		os.Exit(1)
+	}
+	defer knowledgeCleanup()
 
-	engine := app.New(cfg, log, resumeOption, interviewOption)
+	engine := app.New(cfg, log, resumeOption, interviewOption, knowledgeOption)
 
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	log.Info("starting server", "addr", addr, "config_path", configPath)
@@ -59,6 +67,99 @@ func main() {
 		log.Error("server stopped", "error", err)
 		os.Exit(1)
 	}
+}
+
+func buildKnowledgeBaseModule(cfg *config.Config, log *slog.Logger) (app.Option, func(), error) {
+	ctx := context.Background()
+	var cleanup []func()
+
+	var repo knowledgebase.Repository
+	var chatRepo knowledgebase.RagChatRepository
+	var vectorStore vector.Store
+	if cfg.Database.DSN != "" {
+		database, err := db.Open(db.Options{DSN: cfg.Database.DSN})
+		if err != nil {
+			return nil, nil, err
+		}
+		sqlDB, err := database.DB()
+		if err == nil {
+			cleanup = append(cleanup, func() { _ = sqlDB.Close() })
+		}
+		gormRepo := knowledgebase.NewGormRepository(database)
+		if err := gormRepo.AutoMigrate(); err != nil {
+			return nil, nil, err
+		}
+		repo = gormRepo
+		chatRepo = gormRepo
+		vectorStore = vector.NewPGVectorStore(database)
+	} else {
+		log.Warn("DATABASE_DSN is empty; knowledge base module uses in-memory repository")
+		memoryRepo := knowledgebase.NewMemoryRepository()
+		repo = memoryRepo
+		chatRepo = memoryRepo
+		vectorStore = vector.NewMemoryStore()
+	}
+
+	objectStorage, err := storage.NewMinIOStorage(storage.MinIOOptions{
+		Endpoint:  cfg.Storage.Endpoint,
+		Bucket:    cfg.Storage.Bucket,
+		AccessKey: cfg.Storage.AccessKey,
+		SecretKey: cfg.Storage.SecretKey,
+		Region:    cfg.Storage.Region,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	redisClient := redisinfra.New(redisinfra.Options{
+		Addr: cfg.Redis.Addr,
+		DB:   cfg.Redis.DB,
+	})
+	cleanup = append(cleanup, func() { _ = redisClient.Close() })
+
+	model, err := ai.NewProviderRegistry(cfg.AI).Default()
+	if err != nil {
+		return nil, nil, err
+	}
+	provider := cfg.AI.Providers[cfg.AI.DefaultProvider]
+	vectorService := knowledgebase.NewVectorService(knowledgebase.VectorServiceOptions{
+		Store:    vectorStore,
+		Embedder: vector.NewOpenAIEmbedder(provider.BaseURL, provider.APIKey, provider.Model, nil),
+	})
+	queryService := knowledgebase.NewQueryService(knowledgebase.QueryServiceOptions{
+		Repository:    repo,
+		VectorService: vectorService,
+		Model:         model,
+		RewriteModel:  model,
+		PromptLoader:  ai.NewPromptLoader("internal/prompts"),
+		Config:        cfg.RAG,
+	})
+	producer := knowledgebase.NewStreamVectorizeProducer(redisClient)
+	uploadService := knowledgebase.NewUploadService(knowledgebase.UploadServiceOptions{
+		Repository: repo,
+		Storage:    objectStorage,
+		Producer:   producer,
+	})
+	services := knowledgebase.ServiceBundle{
+		List:    knowledgebase.NewListService(repo),
+		Upload:  uploadService,
+		Delete:  knowledgebase.NewDeleteService(repo, objectStorage, vectorStore),
+		Query:   queryService,
+		RagChat: knowledgebase.NewRagChatService(repo, chatRepo, queryService),
+		Storage: objectStorage,
+	}
+	handler := knowledgebase.NewHandler(services)
+
+	consumer := knowledgebase.NewVectorizeConsumer(redisClient, repo, vectorService, "")
+	go runConsumer(ctx, log, "knowledge base vectorize consumer", consumer)
+
+	return app.WithRoutes(func(engine *gin.Engine) {
+			knowledgebase.RegisterRoutes(engine, handler, redisClient)
+		}), func() {
+			for i := len(cleanup) - 1; i >= 0; i-- {
+				cleanup[i]()
+			}
+		}, nil
 }
 
 func buildInterviewModule(cfg *config.Config, log *slog.Logger) (app.Option, func(), error) {

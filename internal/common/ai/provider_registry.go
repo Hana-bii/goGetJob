@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -124,6 +125,7 @@ func (m *OpenAICompatibleChatModel) Generate(ctx context.Context, messages []Cha
 type chatCompletionRequest struct {
 	Model    string        `json:"model"`
 	Messages []ChatMessage `json:"messages"`
+	Stream   bool          `json:"stream,omitempty"`
 }
 
 type chatCompletionResponse struct {
@@ -133,4 +135,89 @@ type chatCompletionResponse struct {
 	Error struct {
 		Message string `json:"message"`
 	} `json:"error"`
+}
+
+func (m *OpenAICompatibleChatModel) StreamGenerate(ctx context.Context, messages []ChatMessage) (<-chan string, error) {
+	if m.baseURL == "" {
+		return nil, fmt.Errorf("chat model base URL is required")
+	}
+	if m.model == "" {
+		return nil, fmt.Errorf("chat model name is required")
+	}
+
+	payload := chatCompletionRequest{
+		Model:    m.model,
+		Messages: messages,
+		Stream:   true,
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal chat request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.baseURL+"/v1/chat/completions", bytes.NewReader(raw))
+	if err != nil {
+		return nil, fmt.Errorf("create chat request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	if m.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+m.apiKey)
+	}
+
+	resp, err := m.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("call chat provider: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		snippet := strings.TrimSpace(string(body))
+		if snippet != "" {
+			return nil, fmt.Errorf("chat provider returned %d: %s", resp.StatusCode, snippet)
+		}
+		return nil, fmt.Errorf("chat provider returned %d", resp.StatusCode)
+	}
+
+	out := make(chan string, 8)
+	go func() {
+		defer close(out)
+		defer resp.Body.Close()
+		scanner := bufio.NewScanner(resp.Body)
+		scanner.Buffer(make([]byte, 1024), 1024*1024)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if !strings.HasPrefix(line, "data:") {
+				continue
+			}
+			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			if data == "" || data == "[DONE]" {
+				if data == "[DONE]" {
+					return
+				}
+				continue
+			}
+			chunk := streamChunk{}
+			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+				continue
+			}
+			for _, choice := range chunk.Choices {
+				if choice.Delta.Content == "" {
+					continue
+				}
+				select {
+				case out <- choice.Delta.Content:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+	return out, nil
+}
+
+type streamChunk struct {
+	Choices []struct {
+		Delta ChatMessage `json:"delta"`
+	} `json:"choices"`
 }
