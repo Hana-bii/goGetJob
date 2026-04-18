@@ -42,3 +42,23 @@ func TestMemoryStoreDeleteByKnowledgeBaseIDUsesKBIDMetadata(t *testing.T) {
 	require.Len(t, docs, 1)
 	require.Equal(t, "b", docs[0].ID)
 }
+
+func TestMemoryStoreScoresWithQueryEmbeddingWhenAvailable(t *testing.T) {
+	store := NewMemoryStore()
+	require.NoError(t, store.AddDocuments(context.Background(), []Document{
+		{ID: "semantic", Content: "unrelated words", Metadata: map[string]any{"kb_id": "1"}, Embedding: []float32{1, 0}},
+		{ID: "lexical", Content: "redis redis", Metadata: map[string]any{"kb_id": "1"}, Embedding: []float32{0, 1}},
+	}))
+
+	docs, err := store.SimilaritySearch(context.Background(), SearchRequest{
+		Query:            "redis",
+		QueryEmbedding:   []float32{1, 0},
+		KnowledgeBaseIDs: []uint{1},
+		TopK:             2,
+	})
+
+	require.NoError(t, err)
+	require.Len(t, docs, 2)
+	require.Equal(t, "semantic", docs[0].ID)
+	require.InDelta(t, 1.0, docs[0].Score, 0.0001)
+}

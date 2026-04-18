@@ -374,12 +374,20 @@ func writeSSE(c *gin.Context, stream <-chan string) {
 	c.Header("Content-Type", "text/event-stream; charset=utf-8")
 	c.Header("Cache-Control", "no-cache")
 	c.Status(http.StatusOK)
-	for chunk := range stream {
-		writeSSEEvent(c.Writer, "message", chunk)
-		flush(c.Writer)
+	for {
+		select {
+		case chunk, ok := <-stream:
+			if !ok {
+				writeSSEEvent(c.Writer, "done", "true")
+				flush(c.Writer)
+				return
+			}
+			writeSSEEvent(c.Writer, "message", chunk)
+			flush(c.Writer)
+		case <-c.Request.Context().Done():
+			return
+		}
 	}
-	writeSSEEvent(c.Writer, "done", "true")
-	flush(c.Writer)
 }
 
 func writeSSEEvent(w io.Writer, event string, data string) {

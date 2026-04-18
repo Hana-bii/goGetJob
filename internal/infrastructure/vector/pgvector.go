@@ -27,6 +27,7 @@ type Document struct {
 
 type SearchRequest struct {
 	Query            string
+	QueryEmbedding   []float32
 	KnowledgeBaseIDs []uint
 	TopK             int
 	MinScore         float64
@@ -78,6 +79,26 @@ func (s *MemoryStore) AddDocuments(_ context.Context, docs []Document) error {
 	return nil
 }
 
+func (s *MemoryStore) ReplaceDocuments(_ context.Context, kbID uint, docs []Document) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := s.docs[:0]
+	for _, doc := range s.docs {
+		if metadataKBID(doc.Metadata) == kbID {
+			continue
+		}
+		out = append(out, doc)
+	}
+	for _, doc := range docs {
+		if doc.Metadata == nil {
+			doc.Metadata = map[string]any{}
+		}
+		out = append(out, doc)
+	}
+	s.docs = out
+	return nil
+}
+
 func (s *MemoryStore) SimilaritySearch(_ context.Context, req SearchRequest) ([]Document, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -92,7 +113,9 @@ func (s *MemoryStore) SimilaritySearch(_ context.Context, req SearchRequest) ([]
 			continue
 		}
 		score := doc.Score
-		if score == 0 {
+		if len(req.QueryEmbedding) > 0 && len(doc.Embedding) > 0 {
+			score = cosineSimilarity(req.QueryEmbedding, doc.Embedding)
+		} else if score == 0 {
 			score = lexicalScore(query, strings.ToLower(doc.Content))
 		}
 		if req.MinScore > 0 && score < req.MinScore {
@@ -163,6 +186,42 @@ func (s *PGVectorStore) AddDocuments(ctx context.Context, docs []Document) error
 	return s.db.WithContext(ctx).Save(&records).Error
 }
 
+func (s *PGVectorStore) ReplaceDocuments(ctx context.Context, kbID uint, docs []Document) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("gorm db is required")
+	}
+	if err := s.ensureTable(); err != nil {
+		return err
+	}
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("knowledge_base_id = ?", kbID).Delete(&VectorRecord{}).Error; err != nil {
+			return err
+		}
+		records := make([]VectorRecord, 0, len(docs))
+		for _, doc := range docs {
+			metadata, err := json.Marshal(doc.Metadata)
+			if err != nil {
+				return fmt.Errorf("marshal vector metadata: %w", err)
+			}
+			embedding, err := json.Marshal(doc.Embedding)
+			if err != nil {
+				return fmt.Errorf("marshal vector embedding: %w", err)
+			}
+			records = append(records, VectorRecord{
+				ID:              doc.ID,
+				KnowledgeBaseID: metadataKBID(doc.Metadata),
+				Content:         doc.Content,
+				Metadata:        string(metadata),
+				Embedding:       string(embedding),
+			})
+		}
+		if len(records) == 0 {
+			return nil
+		}
+		return tx.Save(&records).Error
+	})
+}
+
 func (s *PGVectorStore) SimilaritySearch(ctx context.Context, req SearchRequest) ([]Document, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("gorm db is required")
@@ -181,14 +240,17 @@ func (s *PGVectorStore) SimilaritySearch(ctx context.Context, req SearchRequest)
 	searchText := strings.ToLower(strings.TrimSpace(req.Query))
 	docs := make([]Document, 0, len(records))
 	for _, record := range records {
-		score := lexicalScore(searchText, strings.ToLower(record.Content))
-		if req.MinScore > 0 && score < req.MinScore {
-			continue
-		}
 		var metadata map[string]any
 		_ = json.Unmarshal([]byte(record.Metadata), &metadata)
 		var embedding []float32
 		_ = json.Unmarshal([]byte(record.Embedding), &embedding)
+		score := lexicalScore(searchText, strings.ToLower(record.Content))
+		if len(req.QueryEmbedding) > 0 && len(embedding) > 0 {
+			score = cosineSimilarity(req.QueryEmbedding, embedding)
+		}
+		if req.MinScore > 0 && score < req.MinScore {
+			continue
+		}
 		docs = append(docs, Document{
 			ID:        record.ID,
 			Content:   record.Content,
@@ -334,4 +396,26 @@ func lexicalScore(query, content string) float64 {
 		}
 	}
 	return math.Min(1, float64(matches)/float64(len(terms)))
+}
+
+func cosineSimilarity(left, right []float32) float64 {
+	if len(left) == 0 || len(right) == 0 {
+		return 0
+	}
+	limit := len(left)
+	if len(right) < limit {
+		limit = len(right)
+	}
+	var dot, leftNorm, rightNorm float64
+	for i := 0; i < limit; i++ {
+		l := float64(left[i])
+		r := float64(right[i])
+		dot += l * r
+		leftNorm += l * l
+		rightNorm += r * r
+	}
+	if leftNorm == 0 || rightNorm == 0 {
+		return 0
+	}
+	return dot / (math.Sqrt(leftNorm) * math.Sqrt(rightNorm))
 }

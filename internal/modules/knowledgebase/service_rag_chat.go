@@ -149,17 +149,21 @@ func (s *RagChatService) StreamMessage(ctx context.Context, sessionID string, qu
 		return nil, err
 	}
 
-	out := make(chan string)
+	out := make(chan string, 8)
 	go func() {
 		defer close(out)
 		var answer strings.Builder
 		for chunk := range upstream {
 			answer.WriteString(chunk)
-			out <- chunk
+			select {
+			case out <- chunk:
+			case <-ctx.Done():
+				return
+			}
 		}
 		assistantMessage.Content = answer.String()
 		assistantMessage.Completed = true
-		_ = s.repo.UpdateRagChatMessage(context.Background(), assistantMessage)
+		_ = s.repo.UpdateRagChatMessage(ctx, assistantMessage)
 	}()
 	return out, nil
 }

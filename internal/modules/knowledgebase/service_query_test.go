@@ -13,9 +13,10 @@ import (
 )
 
 type scriptedChatModel struct {
-	responses []string
-	errors    []error
-	prompts   []string
+	responses    []string
+	streamChunks []string
+	errors       []error
+	prompts      []string
 }
 
 func (m *scriptedChatModel) Generate(_ context.Context, messages []ai.ChatMessage) (string, error) {
@@ -33,6 +34,16 @@ func (m *scriptedChatModel) Generate(_ context.Context, messages []ai.ChatMessag
 	next := m.responses[0]
 	m.responses = m.responses[1:]
 	return next, nil
+}
+
+func (m *scriptedChatModel) StreamGenerate(_ context.Context, messages []ai.ChatMessage) (<-chan string, error) {
+	m.prompts = append(m.prompts, messages[0].Content)
+	out := make(chan string, len(m.streamChunks))
+	for _, chunk := range m.streamChunks {
+		out <- chunk
+	}
+	close(out)
+	return out, nil
 }
 
 type queryVectorService struct {
@@ -115,4 +126,32 @@ func TestQueryReturnsNoResultForBlankQuestionOrNoDocs(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Contains(t, resp.Answer, "没有找到相关信息")
+}
+
+func TestStreamAnswerUsesStreamingModelChunks(t *testing.T) {
+	answer := &scriptedChatModel{streamChunks: []string{"Use ", "XPENDING"}}
+	vectorSvc := &queryVectorService{docs: map[string][]vector.Document{
+		"Redis pending": {{Content: "XPENDING shows pending messages.", Metadata: map[string]any{"kb_id": "1"}, Score: 0.9}},
+	}}
+	repo := NewMemoryRepository()
+	require.NoError(t, repo.CreateKnowledgeBase(context.Background(), &KnowledgeBase{ID: 1, Name: "Redis", FileHash: "h"}))
+	service := NewQueryService(QueryServiceOptions{
+		Repository:    repo,
+		VectorService: vectorSvc,
+		Model:         answer,
+		PromptLoader:  ai.NewPromptLoader("../../../internal/prompts"),
+		Config: config.RAGConfig{Search: config.RAGSearchConfig{
+			ShortQueryLength: 4, TopKShort: 20, TopKMedium: 12, TopKLong: 8, MinScoreShort: 0.25, MinScoreDefault: 0.28,
+		}},
+	})
+
+	stream, err := service.StreamAnswer(context.Background(), QueryRequest{KnowledgeBaseIDs: []uint{1}, Question: "Redis pending"})
+	require.NoError(t, err)
+	var chunks []string
+	for chunk := range stream {
+		chunks = append(chunks, chunk)
+	}
+
+	require.Equal(t, []string{"Use ", "XPENDING"}, chunks)
+	require.Len(t, answer.prompts, 1)
 }

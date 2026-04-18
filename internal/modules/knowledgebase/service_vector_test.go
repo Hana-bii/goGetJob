@@ -2,6 +2,7 @@ package knowledgebase
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -12,10 +13,15 @@ import (
 )
 
 type recordingEmbedder struct {
-	batches [][]string
+	batches    [][]string
+	queryTexts []string
+	err        error
 }
 
 func (e *recordingEmbedder) EmbedDocuments(_ context.Context, texts []string) ([][]float32, error) {
+	if e.err != nil {
+		return nil, e.err
+	}
 	e.batches = append(e.batches, append([]string(nil), texts...))
 	out := make([][]float32, len(texts))
 	for i := range texts {
@@ -24,13 +30,16 @@ func (e *recordingEmbedder) EmbedDocuments(_ context.Context, texts []string) ([
 	return out, nil
 }
 
-func (e *recordingEmbedder) EmbedQuery(context.Context, string) ([]float32, error) {
-	return []float32{1}, nil
+func (e *recordingEmbedder) EmbedQuery(_ context.Context, text string) ([]float32, error) {
+	e.queryTexts = append(e.queryTexts, text)
+	return []float32{0.9, 0.1}, nil
 }
 
 type recordingVectorStore struct {
-	deleted []uint
-	added   []vector.Document
+	deleted       []uint
+	added         []vector.Document
+	replacedKBIDs []uint
+	requests      []vector.SearchRequest
 }
 
 func (s *recordingVectorStore) DeleteByKnowledgeBaseID(_ context.Context, kbID uint) error {
@@ -43,7 +52,14 @@ func (s *recordingVectorStore) AddDocuments(_ context.Context, docs []vector.Doc
 	return nil
 }
 
-func (s *recordingVectorStore) SimilaritySearch(context.Context, vector.SearchRequest) ([]vector.Document, error) {
+func (s *recordingVectorStore) ReplaceDocuments(_ context.Context, kbID uint, docs []vector.Document) error {
+	s.replacedKBIDs = append(s.replacedKBIDs, kbID)
+	s.added = append(s.added, docs...)
+	return nil
+}
+
+func (s *recordingVectorStore) SimilaritySearch(_ context.Context, req vector.SearchRequest) ([]vector.Document, error) {
+	s.requests = append(s.requests, req)
 	return nil, nil
 }
 
@@ -57,7 +73,8 @@ func TestVectorizeDeletesOldVectorsBatchesEmbeddingsAndStoresKBMetadata(t *testi
 
 	require.NoError(t, err)
 	require.Equal(t, 11, chunks)
-	require.Equal(t, []uint{42}, store.deleted)
+	require.Empty(t, store.deleted)
+	require.Equal(t, []uint{42}, store.replacedKBIDs)
 	require.Len(t, embedder.batches, 2)
 	require.Len(t, embedder.batches[0], 10)
 	require.Len(t, embedder.batches[1], 1)
@@ -65,6 +82,35 @@ func TestVectorizeDeletesOldVectorsBatchesEmbeddingsAndStoresKBMetadata(t *testi
 	for _, doc := range store.added {
 		require.Equal(t, "42", doc.Metadata["kb_id"])
 	}
+}
+
+func TestVectorizeKeepsOldVectorsWhenEmbeddingFails(t *testing.T) {
+	store := &recordingVectorStore{}
+	service := NewVectorService(VectorServiceOptions{
+		Store:     store,
+		Embedder:  &recordingEmbedder{err: errors.New("embedding failed")},
+		ChunkSize: 10,
+	})
+
+	_, err := service.VectorizeAndStore(context.Background(), 7, "redis stream")
+
+	require.Error(t, err)
+	require.Empty(t, store.deleted)
+	require.Empty(t, store.added)
+	require.Empty(t, store.replacedKBIDs)
+}
+
+func TestSimilaritySearchEmbedsQueryBeforeSearching(t *testing.T) {
+	embedder := &recordingEmbedder{}
+	store := &recordingVectorStore{}
+	service := NewVectorService(VectorServiceOptions{Store: store, Embedder: embedder})
+
+	_, err := service.SimilaritySearch(context.Background(), "redis pending", []uint{1}, 3, 0.2)
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"redis pending"}, embedder.queryTexts)
+	require.Len(t, store.requests, 1)
+	require.Equal(t, []float32{0.9, 0.1}, store.requests[0].QueryEmbedding)
 }
 
 func TestVectorizeTaskHandlerStatusTransitions(t *testing.T) {

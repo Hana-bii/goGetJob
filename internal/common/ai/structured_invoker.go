@@ -21,6 +21,11 @@ type ChatModel interface {
 	Generate(ctx context.Context, messages []ChatMessage) (string, error)
 }
 
+type StreamingChatModel interface {
+	ChatModel
+	StreamGenerate(ctx context.Context, messages []ChatMessage) (<-chan string, error)
+}
+
 type StructuredOptions struct {
 	MaxAttempts       int
 	InjectLastError   bool

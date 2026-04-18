@@ -47,11 +47,11 @@ func (s *VectorService) VectorizeAndStore(ctx context.Context, kbID uint, conten
 	if s == nil || s.store == nil || s.embedder == nil {
 		return 0, fmt.Errorf("vector service dependencies are required")
 	}
-	_ = s.store.DeleteByKnowledgeBaseID(ctx, kbID)
 	chunks := splitChunks(content, s.chunkSize)
 	if len(chunks) == 0 {
 		return 0, fmt.Errorf("knowledge base content is empty")
 	}
+	docs := make([]vector.Document, 0, len(chunks))
 	for start := 0; start < len(chunks); start += s.batchSize {
 		end := start + s.batchSize
 		if end > len(chunks) {
@@ -61,7 +61,6 @@ func (s *VectorService) VectorizeAndStore(ctx context.Context, kbID uint, conten
 		if err != nil {
 			return 0, err
 		}
-		docs := make([]vector.Document, 0, end-start)
 		for i, chunk := range chunks[start:end] {
 			docIndex := start + i
 			var embedding []float32
@@ -79,9 +78,20 @@ func (s *VectorService) VectorizeAndStore(ctx context.Context, kbID uint, conten
 				},
 			})
 		}
-		if err := s.store.AddDocuments(ctx, docs); err != nil {
+	}
+	if replacer, ok := s.store.(interface {
+		ReplaceDocuments(context.Context, uint, []vector.Document) error
+	}); ok {
+		if err := replacer.ReplaceDocuments(ctx, kbID, docs); err != nil {
 			return 0, err
 		}
+		return len(chunks), nil
+	}
+	if err := s.store.DeleteByKnowledgeBaseID(ctx, kbID); err != nil {
+		return 0, err
+	}
+	if err := s.store.AddDocuments(ctx, docs); err != nil {
+		return 0, err
 	}
 	return len(chunks), nil
 }
@@ -93,7 +103,15 @@ func (s *VectorService) SimilaritySearch(ctx context.Context, query string, kbID
 	if topK < 0 {
 		topK = 0
 	}
-	return s.store.SimilaritySearch(ctx, vector.SearchRequest{Query: query, KnowledgeBaseIDs: kbIDs, TopK: topK, MinScore: minScore})
+	request := vector.SearchRequest{Query: query, KnowledgeBaseIDs: kbIDs, TopK: topK, MinScore: minScore}
+	if s.embedder != nil {
+		embedding, err := s.embedder.EmbedQuery(ctx, query)
+		if err != nil {
+			return nil, err
+		}
+		request.QueryEmbedding = embedding
+	}
+	return s.store.SimilaritySearch(ctx, request)
 }
 
 func splitChunks(content string, chunkSize int) []string {

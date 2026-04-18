@@ -22,11 +22,18 @@ func (s *DeleteService) Delete(ctx context.Context, id uint) error {
 	if err != nil {
 		return err
 	}
+	if err := s.repo.DeleteKnowledgeBase(ctx, id); err != nil {
+		return err
+	}
 	if s.vectors != nil {
-		_ = s.vectors.DeleteByKnowledgeBaseID(ctx, id)
+		if err := s.vectors.DeleteByKnowledgeBaseID(ctx, id); err != nil {
+			return err
+		}
 	}
 	if s.storage != nil && kb.StorageKey != "" {
-		_ = s.storage.DeleteObject(ctx, kb.StorageKey)
+		if err := s.storage.DeleteObject(ctx, kb.StorageKey); err != nil {
+			return err
+		}
 	}
-	return s.repo.DeleteKnowledgeBase(ctx, id)
+	return nil
 }

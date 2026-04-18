@@ -94,15 +94,52 @@ func (s *QueryService) Query(ctx context.Context, request QueryRequest) (QueryRe
 }
 
 func (s *QueryService) StreamAnswer(ctx context.Context, request QueryRequest) (<-chan string, error) {
-	out := make(chan string, 1)
+	question := strings.TrimSpace(request.Question)
+	if question == "" || len(request.KnowledgeBaseIDs) == 0 {
+		return singleChunk(ctx, s.noResult), nil
+	}
+	kbs, err := s.loadKnowledgeBases(ctx, request.KnowledgeBaseIDs)
+	if err != nil {
+		return nil, err
+	}
+	if len(kbs) == 0 {
+		return singleChunk(ctx, s.noResult), nil
+	}
+	_ = s.repo.IncrementQuestionCount(ctx, request.KnowledgeBaseIDs)
+	docs, err := s.retrieve(ctx, question, request.KnowledgeBaseIDs)
+	if err != nil {
+		return nil, err
+	}
+	if len(docs) == 0 {
+		return singleChunk(ctx, s.noResult), nil
+	}
+	if s.model == nil {
+		return nil, fmt.Errorf("chat model is required")
+	}
+	messages, err := s.answerMessages(question, docs)
+	if err != nil {
+		return nil, err
+	}
+	if streamer, ok := s.model.(ai.StreamingChatModel); ok {
+		return streamer.StreamGenerate(ctx, messages)
+	}
+
+	out := make(chan string, 8)
 	go func() {
 		defer close(out)
-		resp, err := s.Query(ctx, request)
+		answer, err := s.model.Generate(ctx, messages)
 		if err != nil {
-			out <- "回答生成失败，请稍后重试。"
+			sendChunk(ctx, out, "回答生成失败，请稍后重试。")
 			return
 		}
-		out <- resp.Answer
+		if isNoResultLike(answer) {
+			answer = s.noResult
+		}
+		for _, chunk := range chunkText(answer, 80) {
+			if !sendChunk(ctx, out, chunk) {
+				return
+			}
+		}
 	}()
 	return out, nil
 }
@@ -163,19 +200,27 @@ func (s *QueryService) answer(ctx context.Context, question string, docs []vecto
 	if s.model == nil {
 		return "", fmt.Errorf("chat model is required")
 	}
+	messages, err := s.answerMessages(question, docs)
+	if err != nil {
+		return "", err
+	}
+	return s.model.Generate(ctx, messages)
+}
+
+func (s *QueryService) answerMessages(question string, docs []vector.Document) ([]ai.ChatMessage, error) {
 	contextText := buildContext(docs)
 	system, err := s.loader.Load("knowledgebase-query-system.st")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	user, err := s.loader.Render("knowledgebase-query-user.st", map[string]string{
 		"context":  contextText,
 		"question": question,
 	})
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return s.model.Generate(ctx, []ai.ChatMessage{{Role: "user", Content: system + "\n\n" + user}})
+	return []ai.ChatMessage{{Role: "user", Content: system + "\n\n" + user}}, nil
 }
 
 func (s *QueryService) searchTuning(question string) (int, float64) {
@@ -232,4 +277,37 @@ func isNoResultLike(answer string) bool {
 		}
 	}
 	return false
+}
+
+func singleChunk(ctx context.Context, value string) <-chan string {
+	out := make(chan string, 1)
+	_ = sendChunk(ctx, out, value)
+	close(out)
+	return out
+}
+
+func sendChunk(ctx context.Context, out chan<- string, value string) bool {
+	select {
+	case out <- value:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func chunkText(value string, size int) []string {
+	runes := []rune(value)
+	if size <= 0 || len(runes) <= size {
+		return []string{value}
+	}
+	chunks := make([]string, 0, len(runes)/size+1)
+	for len(runes) > 0 {
+		end := size
+		if len(runes) < end {
+			end = len(runes)
+		}
+		chunks = append(chunks, string(runes[:end]))
+		runes = runes[end:]
+	}
+	return chunks
 }
