@@ -22,9 +22,6 @@ func (s *DeleteService) Delete(ctx context.Context, id uint) error {
 	if err != nil {
 		return err
 	}
-	if err := s.repo.DeleteKnowledgeBase(ctx, id); err != nil {
-		return err
-	}
 	if s.vectors != nil {
 		if err := s.vectors.DeleteByKnowledgeBaseID(ctx, id); err != nil {
 			return err
@@ -35,5 +32,5 @@ func (s *DeleteService) Delete(ctx context.Context, id uint) error {
 			return err
 		}
 	}
-	return nil
+	return s.repo.DeleteKnowledgeBase(ctx, id)
 }
