@@ -6,13 +6,16 @@ app:
   name: goGetJob
 
 database:
+  # In Docker Compose this points at the postgres service.
   dsn: ${DATABASE_DSN:}
 
 redis:
+  # In Docker Compose this points at the redis service.
   addr: ${REDIS_ADDR:localhost:6379}
   db: ${REDIS_DB:0}
 
 storage:
+  # In Docker Compose this points at the storage service.
   endpoint: ${STORAGE_ENDPOINT:http://localhost:9000}
   bucket: ${STORAGE_BUCKET:interview-guide}
   access_key: ${STORAGE_ACCESS_KEY:minioadmin}
@@ -53,7 +56,7 @@ voice:
     default_voice: siyue
     url: wss://dashscope.aliyuncs.com/api-ws/v1/realtime
     model: qwen3-tts-flash-realtime
-    api_key: ${AI_BAILIAN_API_KEY:}
+    api_key: ${VOICE_TTS_API_KEY:}
     voice: Cherry
     format: pcm
     sample_rate: 24000
@@ -64,7 +67,7 @@ voice:
   asr:
     url: wss://dashscope.aliyuncs.com/api-ws/v1/realtime
     model: qwen3-asr-flash-realtime
-    api_key: ${AI_BAILIAN_API_KEY:}
+    api_key: ${VOICE_ASR_API_KEY:}
     language: zh
     format: pcm
     sample_rate: 16000
@@ -74,4 +77,4 @@ voice:
     turn_detection_silence_duration_ms: 2000
 
 cors:
-  allowed_origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173,http://localhost:5174,http://localhost:80}
+  allowed_origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000,http://localhost:5173,http://localhost:5174,http://localhost:80}
